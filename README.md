@@ -24,19 +24,36 @@
 ## Installation & Setup
 
 1. **Clone the repository**
+
    ```bash
    git clone https://github.com/HOYER-Handel/LidlProspekte.git
-   cd LidlProspekte
+
 
 2. **Install dependencies**
-pip install Django requests beautifulsoup4 selenium pillow
 
-3. **Run migrations and start server**
-python manage.py makemigrations
-python manage.py migrate
-python manage.py createsuperuser
-python manage.py runserver
+   ```bash
+   pip install Django
+   pip install selenium
+
+3. **Run migrations and create superuser**
+
+   ```bash
+    python manage.py makemigrations
+    python manage.py migrate
+    python manage.py createsuperuser
+   
 
 
 4. **Download and save a brochure as PDF**
-python manage.py download_lidl_prospekt "URL" PAGES
+   ```bash
+   python manage.py download_lidl_prospekt "URL" PAGES
+
+- Replace "BROCHURE_URL" with the desired brochure link.
+- Replace PAGES with the number of brochure pages.
+
+
+5. **Accessing the Admin Interface**
+
+ Once the server is running, visit http://127.0.0.1:8000/admin/ in your browser and log in with your superuser credentials.
+
+Here, brochures can be viewed, managed, and downloaded.
