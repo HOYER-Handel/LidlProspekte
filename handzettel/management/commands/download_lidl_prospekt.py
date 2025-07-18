@@ -11,10 +11,10 @@ from io import BytesIO
 import datetime
 
 class Command(BaseCommand):
-    help = 'Download Prospekt from rabatt-kompass.de as PDF'
+    help = 'Download flyer from rabatt-kompass.de as PDF'
 
     def add_arguments(self, parser):
-        # Command line arguments: base URL and number of pages to download
+        # Command line arguments: URL and number of pages
         parser.add_argument('baseurl', type=str, help='e.g. https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt')
         parser.add_argument('seiten', type=int, help='Number of pages, e.g. 36')
 
@@ -22,32 +22,33 @@ class Command(BaseCommand):
         baseurl = options['baseurl']
         seiten = options['seiten']
 
-        # === SETUP SELENIUM (Chrome in headless mode) ===
+        # === Set up Selenium ChromeDriver ===
+     
         chromedriver_path = r"C:\Users\emna.kammoun\Downloads\chromedriver-win64\chromedriver-win64\chromedriver.exe"
         chrome_options = Options()
-        chrome_options.add_argument("--headless=new")  # Run Chrome without UI
+        chrome_options.add_argument("--headless=new")  # Run Chrome in headless mode 
         chrome_options.add_argument("--window-size=1920,1080")
         service = Service(executable_path=chromedriver_path)
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        pil_images = []  # Will hold all PIL images for PDF later
-        for i in range(1, seiten + 1):
-            # Build page URL for each flyer/prospekt page
+        pil_images = []
+        # Loop through each requested flyer page
+        for i in range(1, seiten+1):
             page_url = f"{baseurl}#page_{i}"
             print(f"Loading page {i}: {page_url}")
             driver.get(page_url)
-            time.sleep(2.5)  # Wait for images to load
+            time.sleep(2.5)  # Wait for the page and images to load
 
-            # Find main flyer image on the page
+            # Try to find the correct flyer image on the page
             imgs = driver.find_elements("css selector", "img.swiper-lazy, img[loading='lazy']")
             img_url = None
             for img in imgs:
                 url = img.get_attribute("data-src") or img.get_attribute("src")
+                # Only accept correct images from rabatt-kompass, matching "seiten" or "flyer"
                 if url and "rabatt-kompass" in url and ("seiten" in url or "flyer" in url):
                     img_url = url
                     break
-
-            # If no image found, pick the largest image (fallback)
+            # Fallback: If not found, use the biggest image on the page
             if not img_url:
                 imgs2 = driver.find_elements("css selector", "img")
                 biggest = (0, None)
@@ -60,8 +61,7 @@ class Command(BaseCommand):
                         continue
                 if biggest[1]:
                     img_url = biggest[1].get_attribute("src")
-
-            # Download and store the image if found
+            # Download the image and add it to our list
             if img_url:
                 print(f"  Image: {img_url}")
                 r = requests.get(img_url)
@@ -69,22 +69,23 @@ class Command(BaseCommand):
                     im = Image.open(BytesIO(r.content)).convert("RGB")
                     pil_images.append(im)
                 else:
-                    print("  Error downloading image")
+                    print(f"  Error downloading image")
             else:
                 print("  No image found!")
 
-        driver.quit()  # Close Selenium browser
+        driver.quit()  # Close the browser when done
 
+        # If no images were found, abort and print a message
         if not pil_images:
             print("No page images found!")
             return
 
-        # === CREATE PDF FROM ALL IMAGES ===
+        # === Create PDF from all downloaded images ===
         pdf_bytes = BytesIO()
         pil_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=pil_images[1:])
         pdf_bytes.seek(0)
-
-        # === Determine supermarket type from URL ===
+        
+        # === Determine supermarket from URL for naming ===
         supermarkt = "unknown"
         if "lidl" in baseurl:
             supermarkt = "lidl"
@@ -95,12 +96,12 @@ class Command(BaseCommand):
         elif "kaufland" in baseurl:
             supermarkt = "kaufland"
 
-        # === Automatically generate filename with date and supermarket ===
+        # === Generate automatic filename with date and supermarket name ===
         datum = datetime.date.today().strftime('%Y-%m-%d')
         dateiname = f"{supermarkt}_prospekt_{datum}.pdf"
         titel = f"{supermarkt.capitalize()} Prospekt vom {datum}"
 
-        # === Save PDF to Django Model ===
+        # === Save the PDF into the Django model ===
         handzettel = Handzettel(supermarkt=supermarkt, titel=titel)
         handzettel.datei.save(dateiname, ContentFile(pdf_bytes.read()))
         handzettel.save()
