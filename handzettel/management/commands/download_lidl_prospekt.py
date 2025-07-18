@@ -21,7 +21,7 @@ class Command(BaseCommand):
         baseurl = options['baseurl']
         seiten = options['seiten']
 
-        # ChromeDriver Pfad anpassen
+        # ChromeDriver Path
         chromedriver_path = r"C:\Users\emna.kammoun\Downloads\chromedriver-win64\chromedriver-win64\chromedriver.exe"
         chrome_options = Options()
         chrome_options.add_argument("--headless=new")
@@ -86,7 +86,7 @@ class Command(BaseCommand):
         elif "kaufland" in baseurl:
             supermarkt = "kaufland"
 
-        # Automatisch passender Dateiname mit Datum und Supermarkt
+        # Automatically generated filename with date and supermarket
         datum = datetime.date.today().strftime('%Y-%m-%d')
         dateiname = f"{supermarkt}_prospekt_{datum}.pdf"
         titel = f"{supermarkt.capitalize()} Prospekt vom {datum}"
