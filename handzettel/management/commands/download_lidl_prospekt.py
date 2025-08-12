@@ -1,108 +1,176 @@
+import re
 import time
+import datetime
+from io import BytesIO
+
 import requests
+from PIL import Image
+
+from django.core.management.base import BaseCommand
+from django.core.files.base import ContentFile
+
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from django.core.management.base import BaseCommand
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
 from handzettel.models import Handzettel
-from django.core.files.base import ContentFile
-from PIL import Image
-from io import BytesIO
-import datetime
+
 
 class Command(BaseCommand):
-    help = 'Download flyer from rabatt-kompass.de as PDF'
+    help = "Download a flyer as a PDF (supports rabatt-kompass.de and lidl.de)."
 
     def add_arguments(self, parser):
-        # Command line arguments: URL and number of pages
-        parser.add_argument('baseurl', type=str, help='e.g. https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt')
-        parser.add_argument('seiten', type=int, help='Number of pages, e.g. 36')
+        parser.add_argument("baseurl", type=str, help="rabatt-kompass root OR Lidl URL containing /page/1")
+        parser.add_argument("pages", type=int, help="How many pages to download (e.g., 36)")
 
-    def handle(self, *args, **options):
-        baseurl = options['baseurl']
-        seiten = options['seiten']
+    # --- Build the correct URL for each page depending on the site ---
+    def page_url(self, baseurl: str, n: int) -> str:
+        if "lidl.de" in baseurl:
+            # Lidl uses /page/<n> in the path
+            if re.search(r"/page/\d+", baseurl):
+                return re.sub(r"/page/\d+", f"/page/{n}", baseurl)
+            parts = baseurl.split("?", 1)
+            path = parts[0].rstrip("/")
+            query = f"?{parts[1]}" if len(parts) == 2 else ""
+            return f"{path}/page/{n}{query}"
+        # rabatt-kompass uses #page_<n>
+        if re.search(r"#page_\d+", baseurl):
+            return re.sub(r"#page_\d+", f"#page_{n}", baseurl)
+        return f"{baseurl}#page_{n}"
 
-        # === Set up Selenium ChromeDriver ===
-     
+    # --- Click cookie banner if present (Lidl uses OneTrust) ---
+    def accept_cookies_if_present(self, driver):
+        try:
+            btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.ID, "onetrust-accept-btn-handler"))
+            )
+            btn.click()
+            time.sleep(0.3)
+        except Exception:
+            pass  # fine if not there
+
+    # --- Find one good image URL on the current page ---
+    def pick_image_url(self, driver) -> str | None:
+        urls = set()
+
+        # srcset entries often include highest-res image variants
+        for el in driver.find_elements(By.CSS_SELECTOR, "picture source[srcset], img[srcset], source[srcset]"):
+            srcset = el.get_attribute("srcset")
+            if srcset:
+                for part in srcset.split(","):
+                    u = part.strip().split(" ")[0]
+                    if u.startswith("http"):
+                        urls.add(u)
+
+        # regular and lazy images
+        for img in driver.find_elements(By.CSS_SELECTOR, "img, img[data-src]"):
+            for attr in ("data-src", "src"):
+                u = img.get_attribute(attr)
+                if u and u.startswith("http"):
+                    urls.add(u)
+
+        # drop obvious junk
+        urls = {u for u in urls if "cookielaw.org" not in u and "onetrust.com" not in u}
+        urls = {u for u in urls if not u.lower().endswith(".svg")}
+
+        if not urls:
+            return None
+
+        # simple preference: right domain + image extension + flyer-ish keywords
+        def score(u: str) -> int:
+            s = 0
+            if any(k in u for k in ("lidl", "rabatt-kompass", "cloudfront", "cdn", "media", "assets")):
+                s += 2
+            if re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", u, re.I):
+                s += 2
+            if any(k in u.lower() for k in ("flyer", "page", "seiten", "prospekt")):
+                s += 1
+            if any(k in u.lower() for k in ("thumb", "icon", "small")):
+                s -= 1
+            return s
+
+        return sorted(urls, key=score, reverse=True)[0]
+
+    # --- Download one image into a PIL Image ---
+    def fetch_image(self, url: str) -> Image.Image | None:
+        try:
+            r = requests.get(url, timeout=20)
+            if r.status_code == 200 and r.content:
+                return Image.open(BytesIO(r.content)).convert("RGB")
+        except Exception:
+            pass
+        return None
+
+    def handle(self, *args, **opts):
+        baseurl = opts["baseurl"]
+        pages = opts["pages"]
+
+        # 1) Start headless Chrome 
         chromedriver_path = r"C:\Users\emna.kammoun\Downloads\chromedriver-win64\chromedriver-win64\chromedriver.exe"
         chrome_options = Options()
-        chrome_options.add_argument("--headless=new")  # Run Chrome in headless mode 
+        chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--window-size=1920,1080")
-        service = Service(executable_path=chromedriver_path)
-        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver = webdriver.Chrome(service=Service(executable_path=chromedriver_path), options=chrome_options)
 
-        pil_images = []
-        # Loop through each requested flyer page
-        for i in range(1, seiten+1):
-            page_url = f"{baseurl}#page_{i}"
-            print(f"Loading page {i}: {page_url}")
-            driver.get(page_url)
-            time.sleep(2.5)  # Wait for the page and images to load
+        images: list[Image.Image] = []
 
-            # Try to find the correct flyer image on the page
-            imgs = driver.find_elements("css selector", "img.swiper-lazy, img[loading='lazy']")
-            img_url = None
-            for img in imgs:
-                url = img.get_attribute("data-src") or img.get_attribute("src")
-                # Only accept correct images from rabatt-kompass, matching "seiten" or "flyer"
-                if url and "rabatt-kompass" in url and ("seiten" in url or "flyer" in url):
-                    img_url = url
-                    break
-            # Fallback: If not found, use the biggest image on the page
-            if not img_url:
-                imgs2 = driver.find_elements("css selector", "img")
-                biggest = (0, None)
-                for img in imgs2:
-                    try:
-                        w = int(img.get_attribute("width") or 0)
-                        if w > biggest[0]:
-                            biggest = (w, img)
-                    except Exception:
-                        continue
-                if biggest[1]:
-                    img_url = biggest[1].get_attribute("src")
-            # Download the image and add it to our list
-            if img_url:
+        try:
+            for i in range(1, pages + 1):
+                url = self.page_url(baseurl, i)
+                print(f"Loading page {i}: {url}")
+                driver.get(url)
+
+                if i == 1:
+                    self.accept_cookies_if_present(driver)
+
+                # wait for any image, then allow lazy-loading to finish
+                try:
+                    WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "img")))
+                except Exception:
+                    pass
+                time.sleep(1.5)
+
+                img_url = self.pick_image_url(driver)
+                if not img_url:
+                    print("  No image found on this page.")
+                    continue
+
                 print(f"  Image: {img_url}")
-                r = requests.get(img_url)
-                if r.status_code == 200:
-                    im = Image.open(BytesIO(r.content)).convert("RGB")
-                    pil_images.append(im)
+                pic = self.fetch_image(img_url)
+                if pic:
+                    images.append(pic)
                 else:
-                    print(f"  Error downloading image")
-            else:
-                print("  No image found!")
+                    print("  Failed to download image.")
+        finally:
+            driver.quit()
 
-        driver.quit()  # Close the browser when done
-
-        # If no images were found, abort and print a message
-        if not pil_images:
+        if not images:
             print("No page images found!")
             return
 
-        # === Create PDF from all downloaded images ===
-        pdf_bytes = BytesIO()
-        pil_images[0].save(pdf_bytes, format="PDF", save_all=True, append_images=pil_images[1:])
-        pdf_bytes.seek(0)
-        
-        # === Determine supermarket from URL for naming ===
-        supermarkt = "unknown"
-        if "lidl" in baseurl:
-            supermarkt = "lidl"
-        elif "aldi-nord" in baseurl:
-            supermarkt = "aldi_nord"
-        elif "aldi-sued" in baseurl:
-            supermarkt = "aldi_sued"
-        elif "kaufland" in baseurl:
-            supermarkt = "kaufland"
+        # 2) Build a single PDF from all images
+        pdf = BytesIO()
+        images[0].save(pdf, format="PDF", save_all=True, append_images=images[1:])
+        pdf.seek(0)
 
-        # === Generate automatic filename with date and supermarket name ===
-        datum = datetime.date.today().strftime('%Y-%m-%d')
-        dateiname = f"{supermarkt}_prospekt_{datum}.pdf"
-        titel = f"{supermarkt.capitalize()} Prospekt vom {datum}"
+        # 3) Save into model
+        u = baseurl.lower()
+        market = (
+            "lidl" if "lidl" in u else
+            "aldi_nord" if "aldi-nord" in u else
+            "aldi_sued" if "aldi-sued" in u else
+            "kaufland" if "kaufland" in u else
+            "unknown"
+        )
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        filename = f"{market}_prospekt_{today}.pdf"
+        title = f"{market.capitalize()} Prospekt vom {today}"
 
-        # === Save the PDF into the Django model ===
-        handzettel = Handzettel(supermarkt=supermarkt, titel=titel)
-        handzettel.datei.save(dateiname, ContentFile(pdf_bytes.read()))
+        handzettel = Handzettel(supermarkt=market, titel=title)
+        handzettel.datei.save(filename, ContentFile(pdf.read()))
         handzettel.save()
-        print(f"PDF with {len(pil_images)} pages saved as '{dateiname}'!")
+
+        print(f"PDF with {len(images)} pages saved as '{filename}'!")
