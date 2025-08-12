@@ -53,46 +53,54 @@ class Command(BaseCommand):
             pass  # fine if not there
 
     # --- Find one good image URL on the current page ---
+    
     def pick_image_url(self, driver) -> str | None:
-        urls = set()
+     
+        imgs = driver.execute_script("""
+            return Array.from(document.images).map(img => ({
+                src: img.currentSrc || img.src || '',
+                w: img.naturalWidth || 0,
+                h: img.naturalHeight || 0
+            }));
+        """) or []
 
-        # srcset entries often include highest-res image variants
-        for el in driver.find_elements(By.CSS_SELECTOR, "picture source[srcset], img[srcset], source[srcset]"):
-            srcset = el.get_attribute("srcset")
-            if srcset:
-                for part in srcset.split(","):
-                    u = part.strip().split(" ")[0]
-                    if u.startswith("http"):
-                        urls.add(u)
+        EXCLUDE_HOST_BITS = [
+            "bat.bing.com", "cookielaw.org", "onetrust.com",
+            "googletagmanager", "google-analytics", "doubleclick",
+            "facebook", "hotjar", "adservice", "analytics"
+        ]
 
-        # regular and lazy images
-        for img in driver.find_elements(By.CSS_SELECTOR, "img, img[data-src]"):
-            for attr in ("data-src", "src"):
-                u = img.get_attribute(attr)
-                if u and u.startswith("http"):
-                    urls.add(u)
+        candidates = []
+        for it in imgs:
+            u = (it.get("src") or "").strip()
+            w = int(it.get("w") or 0)
+            h = int(it.get("h") or 0)
+            if not u.startswith("http"):
+                continue
+            if any(bad in u for bad in EXCLUDE_HOST_BITS):
+                continue
+            if u.lower().endswith(".svg"):
+                continue
 
-        # drop obvious junk
-        urls = {u for u in urls if "cookielaw.org" not in u and "onetrust.com" not in u}
-        urls = {u for u in urls if not u.lower().endswith(".svg")}
+            # Score: prioritize big images; boost likely flyer/CDN URLs + proper extensions
+            area = w * h
+            score = area
+            if any(k in u for k in ("leaflets", "schwarz", "lidl", "rabatt-kompass", "cloudfront", "cdn", "media", "assets")):
+                score += 500_000
+            if re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", u, re.I):
+                score += 250_000
+            if any(k in u.lower() for k in ("flyer", "page", "seiten", "prospekt")):
+                score += 100_000
+            if any(k in u.lower() for k in ("thumb", "icon", "small")):
+                score -= 200_000
 
-        if not urls:
+            candidates.append((score, u))
+
+        if not candidates:
             return None
 
-        # simple preference: right domain + image extension + flyer-ish keywords
-        def score(u: str) -> int:
-            s = 0
-            if any(k in u for k in ("lidl", "rabatt-kompass", "cloudfront", "cdn", "media", "assets")):
-                s += 2
-            if re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", u, re.I):
-                s += 2
-            if any(k in u.lower() for k in ("flyer", "page", "seiten", "prospekt")):
-                s += 1
-            if any(k in u.lower() for k in ("thumb", "icon", "small")):
-                s -= 1
-            return s
-
-        return sorted(urls, key=score, reverse=True)[0]
+        candidates.sort(reverse=True)
+        return candidates[0][1]
 
     # --- Download one image into a PIL Image ---
     def fetch_image(self, url: str) -> Image.Image | None:
