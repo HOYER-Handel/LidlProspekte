@@ -18,6 +18,13 @@ from selenium.webdriver.support import expected_conditions as EC
 
 from handzettel.models import Handzettel
 
+import os #for reading environment variables
+from dotenv import load_dotenv
+import msal #microsoft authentification library
+
+#Load envt variables for Azure credentials
+load_dotenv()
+
 
 class Command(BaseCommand):
     help = "Download a flyer as a PDF (supports rabatt-kompass.de and lidl.de)."
@@ -182,3 +189,55 @@ class Command(BaseCommand):
         handzettel.save()
 
         print(f"PDF with {len(images)} pages saved as '{filename}'!")
+        
+        #Azure sharePoint upload
+        print("uploading PDF to SharePoint")
+        #Read sharePoint/Azure config from envt variables
+        client_id = os.getenv("AZURE_CLIENT_ID")
+        client_secret = os.getenv("AZURE_CLIENT_SECRET")
+        tenant_id = os.getenv("AZURE_TENANT_ID")
+        sharepoint_site = os.getenv("SHAREPOINT_SITE")
+        sharepoint_folder = os.getenv("SHAREPOINT_FOLDER")
+        
+        #ensure that all required config values are set
+        if not all([client_id,client_secret,tenant_id,sharepoint_site,sharepoint_folder]):
+            print("ERROR: SahrePoint/Azure configuration missing!")
+            return
+        
+        #Use msal to get a token for the graph API
+        app = msal.ConfidentialClientApplication(
+            client_id,
+            authority=f"https://login.microsoftonline.com/{tenant_id}",
+            client_credential=client_secret
+        )
+        token_result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+        if "access_token" not in token_result:
+            print("ERROR: Could not get access token:",token_result.get("error_description"))
+            return
+        token = token_result["access_token"]
+        headers ={'Authorization' : f'Bearer {token}'}
+        
+        #Get sharePoint site ID
+        site_info = requests.get(f"https://graph.microsoft.com/v1.0/sites/{sharepoint_site}", headers=headers).json()
+        site_id = site_info.get('id')
+        if not site_id:
+            print("ERROR: SharePoint Site ID nicht gefunden!", site_info)
+            return
+        
+        #Upload the PDF to the correct sharePoint folder via the Graph API
+        upload_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{sharepoint_folder}/{filename}:/content"
+        with open(handzettel.datei.path, "rb") as f:
+            resp = requests.put(upload_url, headers=headers, data=f)
+        if resp.status_code in (200, 201):
+            print("PDF successfully uploaded to SharePoint!")
+        else:
+            print("Error uploading to SharePoint:", resp.status_code, resp.text)
+        
+
+        
+        
+
+            
+        
+        
+        
