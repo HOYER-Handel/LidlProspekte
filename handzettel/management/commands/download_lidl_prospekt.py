@@ -24,11 +24,8 @@ import msal #microsoft authentification library
 
 #Load envt variables for Azure credentials
 load_dotenv()
-
-
 class Command(BaseCommand):
     help = "Download a flyer as a PDF (supports rabatt-kompass.de and lidl.de)."
-
     def add_arguments(self, parser):
         parser.add_argument("baseurl", type=str, help="rabatt-kompass root OR Lidl URL containing /page/1")
         parser.add_argument("pages", type=int, help="How many pages to download (e.g., 36)")
@@ -90,10 +87,10 @@ class Command(BaseCommand):
             if u.lower().endswith(".svg"):
                 continue
 
-            # Score: prioritize big images; boost likely flyer/CDN URLs + proper extensions
+            # Score: prioritize big images; boost likely flyer + proper extensions
             area = w * h
             score = area
-            if any(k in u for k in ("leaflets", "schwarz", "lidl", "rabatt-kompass", "cloudfront", "cdn", "media", "assets")):
+            if any(k in u for k in ("lidl", "rabatt-kompass")):
                 score += 500_000
             if re.search(r"\.(jpg|jpeg|png|webp)(\?|$)", u, re.I):
                 score += 250_000
@@ -269,18 +266,18 @@ class Command(BaseCommand):
             print("OK: Using drive:", drive.get("name"), drive_id)
         except Exception as e:
             return die("Drive lookup failed", e)
-        
-        
+    
         # 4) Ensure subfolders exist
         def ensure_folder_path(drive_id: str, folder_path: str):
-           
             parts = [p for p in folder_path.split("/") if p.strip()]
             parent_path = ""
             for part in parts:
                 parent_path = f"{parent_path}/{part}" if parent_path else part
                 # Check if folder exists
-                r = requests.get(f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{parent_path}",
-                                headers=headers)
+                r = requests.get(
+                                f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{parent_path}",
+                                headers=headers
+                                )
                 if r.status_code == 404:
                     # Create folder
                     parent_parent = f"/{parent_path.rsplit('/',1)[0]}" if "/" in parent_path else ""
@@ -294,7 +291,6 @@ class Command(BaseCommand):
                 elif r.status_code != 200:
                     raise RuntimeError(f"Folder check failed for '{parent_path}': {r.status_code} {r.text}")
 
-       
         subpath = "/".join(sharepoint_folder.split("/")[1:])
         try:
             if subpath:
