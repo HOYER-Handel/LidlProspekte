@@ -199,7 +199,7 @@ class Command(BaseCommand):
         baseurl = opts["baseurl"]
         pages = opts["pages"]
 
-        use_github_actions = os.getenv("USE_GITHUB_ACTIONS", "true").lower() == "true"
+        use_github_actions = os.getenv("USE_GITHUB_ACTIONS", "false").lower() == "true"
 
         if use_github_actions:
             print("using github actions for selenium processing")
