@@ -12,17 +12,15 @@ from PIL import Image
 from django.core.management.base import BaseCommand
 from django.core.files.base import ContentFile
 
+"""
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-
 from selenium.webdriver import Remote
-
-
 from handzettel.models import Handzettel
-
+"""
 import os  # for reading environment variables
 from dotenv import load_dotenv
 import msal  # microsoft authentification library
@@ -157,44 +155,74 @@ class Command(BaseCommand):
 
     # ---Github Actions trigger ---
     def trigger_github_action(self, baseurl, pages):
-        github_token = os.getenv("GITHUB_TOKEN")
-        repo_owner = os.getenv("GITHUB_REPO_OWNER")
-        repo_name = os.getenv("GITHUB_REPO_NAME")
-        workflow_id = os.getenv("GITHUB_WORKFLOW_ID", "selenium-flyer.yml")
+        token = os.getenv("GITHUB_TOKEN")
+        owner = os.getenv("GITHUB_REPO_OWNER")
+        repo = os.getenv("GITHUB_REPO_NAME")
+        wf = os.getenv("GITHUB_WORKFLOW_ID", "selenium-flyer.yml")
 
-        # Check if all required variables are set
-        if not all([github_token, repo_owner, repo_name]):
-            print("GitHub configuration missing. Please set:")
-            print("GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME")
+        if not all([token, owner, repo]):
+            print(
+                "GitHub configuration missing. Set GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME"
+            )
             return False
 
-        # GitHub API URL
-        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/actions/workflows/{workflow_id}/dispatches"
-
         headers = {
-            "Authorization": f"Bearer {github_token}",
-            "Accept": "application/vnd.github.v3+json",
-            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
         }
 
-        data = {
-            "ref": "feature/pythonanywhere-deplyoment",
-            "inputs": {"baseurl": baseurl, "pages": str(pages)},
-        }
+        # Decide which branch to dispatch: env → repo default → 'feature/pythonanywhere-deplyoment'
+        ref = os.getenv("GITHUB_REF")
+        if not ref:
+            try:
+                r = requests.get(
+                    f"https://api.github.com/repos/{owner}/{repo}",
+                    headers=headers,
+                    timeout=15,
+                )
+                r.raise_for_status()
+                ref = r.json().get(
+                    "default_branch", "feature/pythonanywhere-deplyoment"
+                )
+            except Exception:
+                ref = "feature/pythonanywhere-deplyoment"
+
+        # Resolve numeric workflow ID if a filename was provided
+        wf_id = wf
+        if not wf.isdigit():
+            r = requests.get(
+                f"https://api.github.com/repos/{owner}/{repo}/actions/workflows",
+                headers=headers,
+                timeout=15,
+            )
+            if r.status_code != 200:
+                print("Cannot list workflows:", r.status_code, r.text)
+                return False
+            items = r.json().get("workflows", [])
+            match = next((w for w in items if w.get("path", "").endswith(wf)), None)
+            if not match:
+                print("Workflow not found. Available:", [w.get("path") for w in items])
+                return False
+            wf_id = str(match["id"])
+
+        url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{wf_id}/dispatches"
+        payload = {"ref": ref, "inputs": {"baseurl": baseurl, "pages": str(pages)}}
 
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=30)
-
-            if response.status_code == 204:
-                print("GitHub Actions workflow triggered successfully")
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
+            if resp.status_code == 204:
+                print(f"GitHub Actions workflow dispatched (wf={wf_id}, ref={ref})")
                 return True
-            else:
-                print(f"Failed to trigger workflow: {response.status_code}")
-                print(f"Response: {response.text}")
-                return False
-
+            print(f"Failed to trigger workflow: {resp.status_code}")
+            print(f"Response: {resp.text}")
+            if resp.status_code == 404:
+                print(
+                    "HINTS: wrong workflow filename/path (.github/workflows), wrong branch, "
+                    "or token lacks repo+workflow scopes / SSO not authorized."
+                )
+            return False
         except requests.exceptions.RequestException as e:
-            print(f"Network error triggering GitHub Actions: {e}")
+            print("Network error triggering GitHub Actions:", e)
             return False
 
     # --Main--
@@ -202,19 +230,33 @@ class Command(BaseCommand):
         baseurl = opts["baseurl"]
         pages = opts["pages"]
 
-        use_github_actions = os.getenv("USE_GITHUB_ACTIONS", "false").lower() == "true"
-
         if use_github_actions:
             print("using github actions for selenium processing")
             success = self.trigger_github_action(baseurl, pages)
             if success:
                 print("Flyer processing job submitted to github actions")
                 return
-            else:
-                print("Failed to submit job to Github Actioons")
-        print("using local selenium processing")
+            # Do NOT attempt local Selenium on PythonAnywhere
+            raise CommandError(
+                "Failed to trigger GitHub Actions (see above). Not running Selenium locally on PythonAnywhere."
+            )
 
-        print("Using local Selenuim processing")
+        # -------- Local processing branch (only if you explicitly set USE_GITHUB_ACTIONS=false) --------
+        # Lazy import Selenium only if run locally
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver import Remote
+        except Exception as e:
+            raise CommandError(
+                f"Selenium not available locally: {e}\n"
+                "Set USE_GITHUB_ACTIONS=true to run via GitHub Actions."
+            )
+
+        print("using local selenium processing")
         chrome_options = Options()
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--window-size=1920,1080")
@@ -225,9 +267,10 @@ class Command(BaseCommand):
         driver = None
         try:
             if remote_url:
+
                 driver = Remote(command_executor=remote_url, options=chrome_options)
             else:
-                # This will usually fail on PythonAnywhere — that’s expected
+                # This will usually fail on PythonAnywhere
                 driver = webdriver.Chrome(options=chrome_options)
         except Exception as e:
             raise Exception(
@@ -249,8 +292,12 @@ class Command(BaseCommand):
 
                 # wait for any image, then allow lazy-loading to finish
                 try:
-                    WebDriverWait(driver, 8).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "img"))
+                    from selenium.webdriver.common.by import By as _By
+                    from selenium.webdriver.support.ui import WebDriverWait as _Wait
+                    from selenium.webdriver.support import expected_conditions as _EC
+
+                    _Wait(driver, 8).until(
+                        _EC.presence_of_element_located((_By.TAG_NAME, "img"))
                     )
                 except Exception:
                     pass
@@ -268,7 +315,11 @@ class Command(BaseCommand):
                 else:
                     print("  Failed to download image.")
         finally:
-            driver.quit()
+            try:
+                if driver:
+                    driver.quit()
+            except Exception:
+                pass
 
         if not images:
             print("No page images found!")
@@ -279,7 +330,7 @@ class Command(BaseCommand):
         images[0].save(pdf, format="PDF", save_all=True, append_images=images[1:])
         pdf.seek(0)
 
-        # 3) Save into model
+        # 3) Save into model (import lazily so dispatch-only runs don't need models)
         u = baseurl.lower()
         market = (
             "lidl"
@@ -297,16 +348,18 @@ class Command(BaseCommand):
         today = datetime.date.today().strftime("%Y-%m-%d")
         filename = f"{market}_prospekt_{today}.pdf"
         title = f"{market.capitalize()} Prospekt vom {today}"
-        # save in django model
+
+        from handzettel.models import Handzettel  # lazy import
+
         handzettel = Handzettel(supermarkt=market, titel=title)
         handzettel.datei.save(filename, ContentFile(pdf.read()))
         handzettel.save()
 
         print(f"PDF with {len(images)} pages saved as '{filename}'!")
 
-        # Azure sharePoint upload
+        # Azure SharePoint upload
         print("uploading PDF to SharePoint")
-        # Read sharePoint/Azure config from envt variables
+        # Read SharePoint/Azure config from env variables
         client_id = os.getenv("AZURE_CLIENT_ID")
         client_secret = os.getenv("AZURE_CLIENT_SECRET")
         tenant_id = os.getenv("AZURE_TENANT_ID")
@@ -402,7 +455,12 @@ class Command(BaseCommand):
                 # Check if folder exists
                 r = requests.get(
                     f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{parent_path}",
-                    headers=headers,
+                    headers=  # The above code seems to be a comment in Python. Comments in Python start
+                    # with the `#` symbol and are used to provide explanations or notes within
+                    # the code. In this case, the comment mentions "headers", which could be
+                    # referring to a section of code related to headers in a program or
+                    # script.
+                    headers,
                 )
                 if r.status_code == 404:
                     # Create folder
