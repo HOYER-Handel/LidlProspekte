@@ -9,7 +9,7 @@ from typing import Optional, List
 import requests
 from PIL import Image
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.core.files.base import ContentFile
 
 """
@@ -229,6 +229,8 @@ class Command(BaseCommand):
     def handle(self, *args, **opts):
         baseurl = opts["baseurl"]
         pages = opts["pages"]
+
+        use_github_actions = os.getenv("USE_GITHUB_ACTIONS", "false").lower() == "true"
 
         if use_github_actions:
             print("using github actions for selenium processing")
