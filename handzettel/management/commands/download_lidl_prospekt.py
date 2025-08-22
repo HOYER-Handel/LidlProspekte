@@ -156,43 +156,46 @@ class Command(BaseCommand):
         return None
 
     # ---Github Actions trigger ---
-    def trigger_github_action(self, baseurl, pages) -> bool:
+    def trigger_github_action(self, baseurl, pages):
         github_token = os.getenv("GITHUB_TOKEN")
         repo_owner = os.getenv("GITHUB_REPO_OWNER")
         repo_name = os.getenv("GITHUB_REPO_NAME")
         workflow_id = os.getenv("GITHUB_WORKFLOW_ID", "selenium-flyer.yml")
-        github_ref = os.getenv("GITHUB_REF", "main")
 
+        # Check if all required variables are set
         if not all([github_token, repo_owner, repo_name]):
-            raise RuntimeError(
-                "GitHub configuration missing: GITHUB_TOKEN / GITHUB_REPO_OWNER / GITHUB_REPO_NAME"
-            )
+            print("GitHub configuration missing. Please set:")
+            print("GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME")
+            return False
 
+        # GitHub API URL
         url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/actions/workflows/{workflow_id}/dispatches"
+
         headers = {
             "Authorization": f"Bearer {github_token}",
-            "Accept": "application/vnd.github+json",
+            "Accept": "application/vnd.github.v3+json",
             "Content-Type": "application/json",
         }
 
-        data = {"ref": github_ref, "inputs": {"url": baseurl, "pages": str(pages)}}
+        data = {
+            "ref": "feature/pythonanywhere-deplyoment",
+            "inputs": {"baseurl": baseurl, "pages": str(pages)},
+        }
 
-        response = requests.post(url, headers=headers, json=data, timeout=30)
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=30)
 
-        if response.status_code == 204:
-            self.stdout.write(self.style.SUCCESS("GitHub Actions workflow triggered"))
-            return True
+            if response.status_code == 204:
+                print("GitHub Actions workflow triggered successfully")
+                return True
+            else:
+                print(f"Failed to trigger workflow: {response.status_code}")
+                print(f"Response: {response.text}")
+                return False
 
-        self.stdout.write(
-            self.style.ERROR(
-                f"GitHub trigger failed {response.status_code}: {response.text[:400]}"
-            )
-        )
-        if response.status_code == 404:
-            self.stdout.write("Check GITHUB_WORKFLOW_ID (filename) and branch ref.")
-        if response.status_code in (401, 403):
-            self.stdout.write("Check PAT scopes: need repo + workflow/actions.")
-        return False
+        except requests.exceptions.RequestException as e:
+            print(f"Network error triggering GitHub Actions: {e}")
+            return False
 
     # --Main--
     def handle(self, *args, **opts):
@@ -206,9 +209,10 @@ class Command(BaseCommand):
             success = self.trigger_github_action(baseurl, pages)
             if success:
                 print("Flyer processing job submitted to github actions")
+                return
             else:
                 print("Failed to submit job to Github Actioons")
-            return
+        print("using local selenium processing")
 
         print("Using local Selenuim processing")
         chrome_options = Options()
