@@ -155,74 +155,51 @@ class Command(BaseCommand):
 
     # ---Github Actions trigger ---
     def trigger_github_action(self, baseurl, pages):
-        token = os.getenv("GITHUB_TOKEN")
-        owner = os.getenv("GITHUB_REPO_OWNER")
-        repo = os.getenv("GITHUB_REPO_NAME")
-        wf = os.getenv("GITHUB_WORKFLOW_ID", "selenium-flyer.yml")
+        github_token = os.getenv("GITHUB_TOKEN")
+        repo_owner = os.getenv("GITHUB_REPO_OWNER")
+        repo_name = os.getenv("GITHUB_REPO_NAME")
 
-        if not all([token, owner, repo]):
-            print(
-                "GitHub configuration missing. Set GITHUB_TOKEN, GITHUB_REPO_OWNER, GITHUB_REPO_NAME"
-            )
+        if not all([github_token, repo_owner, repo_name]):
+            print("GitHub configuration missing")
             return False
+
+        # Use the filename approach (simpler)
+        workflow_filename = "selenium-flyer.yml"
+        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/actions/workflows/{workflow_filename}/dispatches"
 
         headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json",
         }
 
-        # Decide which branch to dispatch: env → repo default → 'feature/pythonanywhere-deplyoment'
-        ref = os.getenv("GITHUB_REF")
-        if not ref:
-            try:
-                r = requests.get(
-                    f"https://api.github.com/repos/{owner}/{repo}",
-                    headers=headers,
-                    timeout=15,
-                )
-                r.raise_for_status()
-                ref = r.json().get(
-                    "default_branch", "feature/pythonanywhere-deplyoment"
-                )
-            except Exception:
-                ref = "feature/pythonanywhere-deplyoment"
-
-        # Resolve numeric workflow ID if a filename was provided
-        wf_id = wf
-        if not wf.isdigit():
-            r = requests.get(
-                f"https://api.github.com/repos/{owner}/{repo}/actions/workflows",
-                headers=headers,
-                timeout=15,
-            )
-            if r.status_code != 200:
-                print("Cannot list workflows:", r.status_code, r.text)
-                return False
-            items = r.json().get("workflows", [])
-            match = next((w for w in items if w.get("path", "").endswith(wf)), None)
-            if not match:
-                print("Workflow not found. Available:", [w.get("path") for w in items])
-                return False
-            wf_id = str(match["id"])
-
-        url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{wf_id}/dispatches"
-        payload = {"ref": ref, "inputs": {"baseurl": baseurl, "pages": str(pages)}}
+        # Use the correct branch name (adjust if needed)
+        data = {
+            "ref": "feature/pythonanywhere-deplyoment",
+            "inputs": {"baseurl": baseurl, "pages": str(pages)},
+        }
 
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=30)
-            if resp.status_code == 204:
-                print(f"GitHub Actions workflow dispatched (wf={wf_id}, ref={ref})")
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+
+            if response.status_code == 204:
+                print("GitHub Actions workflow triggered successfully")
                 return True
-            print(f"Failed to trigger workflow: {resp.status_code}")
-            print(f"Response: {resp.text}")
-            if resp.status_code == 404:
-                print(
-                    "HINTS: wrong workflow filename/path (.github/workflows), wrong branch, "
-                    "or token lacks repo+workflow scopes / SSO not authorized."
-                )
-            return False
+            else:
+                print(f"Failed to trigger workflow: {response.status_code}")
+                print(f"Response: {response.text}")
+
+                # Additional debug info
+                if response.status_code == 404:
+                    print("Workflow not found. Check:")
+                    print("1. Workflow file exists in .github/workflows/")
+                    print("2. Workflow is in the correct branch")
+                    print("3. GitHub token has workflow permissions")
+
+                return False
+
         except requests.exceptions.RequestException as e:
-            print("Network error triggering GitHub Actions:", e)
+            print(f"Network error triggering GitHub Actions: {e}")
             return False
 
     # --Main--
