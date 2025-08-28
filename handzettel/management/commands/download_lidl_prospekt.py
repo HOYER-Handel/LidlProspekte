@@ -139,7 +139,7 @@ class Command(BaseCommand):
         except Exception:
             pass
 
-    # 🟦 extract German-style dates from any text blob
+    #  extract German-style dates from any text blob
     def _extract_date_range(self, blob_lower: str):
         today = datetime.date.today()
         year = today.year
