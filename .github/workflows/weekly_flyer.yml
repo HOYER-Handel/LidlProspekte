@@ -2,9 +2,9 @@ name: Weekly flyer → SharePoint
 
 on:
   schedule:
-    # Jeden Montag 05:07 UTC (Sommer = 07:07 Berlin, Winter = 06:07)
+    #Every Monday at 05:07 UTC (summer ~ 07:07 Berlin, winter ~ 06:07)
     - cron: "7 5 * * 1"
-  workflow_dispatch: {}
+  workflow_dispatch: {} #allow manual start
 
 jobs:
   run:
@@ -22,28 +22,27 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Falls du requirements.txt hast, nutze die – sonst installiere minimal:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
             pip install django requests pillow selenium python-dotenv msal
           fi
 
-      # Chrome + Chromedriver für Selenium
+      # Chrome + Chromedriver for Selenium
       - name: Setup Google Chrome
         uses: browser-actions/setup-chrome@v1
       - name: Setup Chromedriver
         uses: nanasess/setup-chromedriver@v2
 
-      # (Optional) Exakte Berlin-Zeit 07:07 via Guard – verhindert Winter/Sommer-Zeitabweichung
       - name: Guard for Berlin time 07:07 Monday
+        if: ${{ github.event_name == 'schedule' }}
         run: |
           if [ "$(TZ=Europe/Berlin date +'%u %H %M')" != "1 07 07" ]; then
             echo "Not Monday 07:07 Berlin; skipping run."; exit 0; fi
 
-      - name: Run Django command
+      - name: Run Django command(s)
         env:
-          DJANGO_SETTINGS_MODULE: yourproject.settings # ← anpassen!
+          DJANGO_SETTINGS_MODULE: prospektprojekt.settings
           SECRET_KEY: ${{ secrets.SECRET_KEY }}
           DEBUG: "False"
 
@@ -53,7 +52,9 @@ jobs:
           SHAREPOINT_SITE: ${{ secrets.SHAREPOINT_SITE }}
           SHAREPOINT_FOLDER: ${{ secrets.SHAREPOINT_FOLDER }}
 
-          # Optional: Pfad falls dein Code CHROMEDRIVER nutzt
-          CHROMEDRIVER: /usr/local/bin/chromedriver
+          RK_PICK: current
         run: |
-          python manage.py <YOUR_CMD> "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" 60
+
+          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" 60
+          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt" 60
+          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt" 60
