@@ -1,9 +1,8 @@
 # This Python class downloads flyer images from websites, creates a PDF from the images, saves the PDF
 # to a model, and uploads the PDF to SharePoint using the Microsoft Graph API.
 
-import re, time, datetime
+import re, time, datetime, json, urllib.parse
 from io import BytesIO
-import json, urllib.parse
 from urllib.parse import urlparse
 
 import requests
@@ -70,6 +69,59 @@ class Command(BaseCommand):
     # simple logger
     def _log(self, level: str, *parts):
         print(f"[{level} {time.strftime('%H:%M:%S')}]", " ".join(str(p) for p in parts))
+
+    # ---------- Chrome / Cloudflare helpers ----------
+    def _configure_chrome_options(self) -> Options:
+        opts = Options()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--window-size=1920,1080")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        )
+        opts.add_argument(f"--user-agent={ua}")
+        return opts
+
+    def _apply_basic_stealth(self, driver):
+        try:
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {
+                    "source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+                },
+            )
+        except Exception:
+            pass
+
+    def _wait_cloudflare(self, driver, max_wait=25):
+        """Wait through Cloudflare 'Just a moment…' challenge."""
+        start = time.time()
+        while time.time() - start < max_wait:
+            url = driver.current_url or ""
+            title = (driver.title or "").lower()
+            if (
+                ("__cf_chl_" in url)
+                or ("just a moment" in title)
+                or ("cloudflare" in title)
+            ):
+                self._log("DBG", "CF challenge detected; waiting…")
+                time.sleep(2)
+                continue
+            try:
+                if driver.find_elements(
+                    By.ID, "challenge-stage"
+                ) or driver.find_elements(By.CSS_SELECTOR, ".cf-browser-verification"):
+                    self._log("DBG", "CF challenge DOM present; waiting…")
+                    time.sleep(2)
+                    continue
+            except Exception:
+                pass
+            break
 
     # --- Build the correct URL for each page depending on the site ---
     def page_url(self, baseurl: str, n: int) -> str:
@@ -326,21 +378,11 @@ class Command(BaseCommand):
     #  open a candidate viewer and extract firm dates/labels from the page itself
     # Second pass verification
     def _inspect_viewer_details(self, driver, href: str):
-        """
-        Returns dict:
-          {
-            'href': href,
-            'start': date|None,
-            'end': date|None,
-            'is_vorschau': bool,
-            'status': 'current'|'upcoming'|'past'|'unknown',
-            'bonus': int,
-            'reason': str
-          }
-        """
+
         status, bonus, reason = "unknown", 0, []
         try:
             driver.get(href if "#page_1" in href else href + "#page_1")
+            self._wait_cloudflare(driver)
             try:
                 WebDriverWait(driver, 6).until(
                     EC.presence_of_element_located(
@@ -632,12 +674,11 @@ class Command(BaseCommand):
         resolved_slug = None
         if "rabatt-kompass.de" in baseurl and "/prospekt-" not in baseurl:
             try:
-                tmp_opts = Options()
-                tmp_opts.add_argument("--headless=new")
-                tmp_opts.add_argument("--window-size=1200,900")
-                tmp_driver = webdriver.Chrome(options=tmp_opts)
+                tmp_driver = webdriver.Chrome(options=self._configure_chrome_options())
+                self._apply_basic_stealth(tmp_driver)
                 try:
                     tmp_driver.get(baseurl)
+                    self._wait_cloudflare(tmp_driver)
                     try:
                         WebDriverWait(tmp_driver, 3).until(
                             EC.element_to_be_clickable(
@@ -671,7 +712,75 @@ class Command(BaseCommand):
                     overview_scored.sort(key=lambda t: t[0], reverse=True)
 
                     top = overview_scored[:6]
-                    if top:
+                    if not top:
+                        # Regex fallback when DOM is empty (CF, lazy-loading, etc.)
+                        html = tmp_driver.page_source or ""
+                        raw = re.findall(
+                            r'https://rabatt-kompass\.de/[^"\'\s]*/prospekt-\d+-0', html
+                        )
+                        raw = list(dict.fromkeys(raw))
+                        self._log("DBG", f"RK overview regex → {len(raw)} candidates")
+
+                        verified = []
+                        for href in raw[:12]:
+                            det = self._inspect_viewer_details(tmp_driver, href)
+                            total = det["bonus"]
+                            verified.append(
+                                {
+                                    "href": href,
+                                    "total": total,
+                                    "status": det["status"],
+                                    "start": det["start"],
+                                    "end": det["end"],
+                                    "why": det["reason"],
+                                }
+                            )
+
+                        def pick_by_status(desired):
+                            c = [v for v in verified if v["status"] == desired]
+                            return max(c, key=lambda v: v["total"]) if c else None
+
+                        choice = None
+                        if rk_pick_mode == "current":
+                            choice = (
+                                pick_by_status("current")
+                                or pick_by_status("unknown")
+                                or pick_by_status("upcoming")
+                            )
+                        elif rk_pick_mode == "upcoming":
+                            upcoming = [
+                                v for v in verified if v["status"] == "upcoming"
+                            ]
+                            if upcoming and any(v["start"] for v in upcoming):
+                                upcoming.sort(
+                                    key=lambda v: (
+                                        v["start"] or datetime.date.max,
+                                        -v["total"],
+                                    )
+                                )
+                                choice = upcoming[0]
+                            else:
+                                choice = pick_by_status("upcoming") or pick_by_status(
+                                    "current"
+                                )
+                        else:  # latest
+                            verified.sort(
+                                key=lambda v: int(
+                                    re.search(r"/prospekt-(\d+)-0", v["href"]).group(1)
+                                ),
+                                reverse=True,
+                            )
+                            choice = verified[0] if verified else None
+
+                        if choice:
+                            baseurl = choice["href"]
+                            resolved_slug = self.viewer_slug(baseurl)
+                            self._log(
+                                "INFO",
+                                "Redirecting to viewer (regex fallback):",
+                                baseurl,
+                            )
+                    else:
                         dump = json.dumps(
                             [[sc, href] for sc, href, _ in top],
                             indent=2,
@@ -750,7 +859,8 @@ class Command(BaseCommand):
                             pid = pid.group(1) if pid else "-"
                             self._log(
                                 "DBG",
-                                f"  id={pid} status={v['status']} overview={v['overview_score']} bonus={v['viewer_bonus']} total={v['total']} :: {v['href']}",
+                                f"  id={pid} status={v['status']} overview={v.get('overview_score','-')} "
+                                f"bonus={v.get('viewer_bonus','-')} total={v['total']} :: {v['href']}",
                             )
                         self._log("INFO", "Redirecting to viewer:", best_href)
                         baseurl = best_href
@@ -761,17 +871,21 @@ class Command(BaseCommand):
                 self._log("DBG", "overview resolver error:", e)
 
         # 1) Start headless Chrome (main)
-        chromedriver_path = r"C:\Users\emna.kammoun\Downloads\chromedriver-win64\chromedriver-win64\chromedriver.exe"
-        chrome_options = Options()
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options = self._configure_chrome_options()
+        chromedriver_path = os.getenv("CHROMEDRIVER", "").strip()
         try:
-            driver = webdriver.Chrome(
-                service=Service(chromedriver_path), options=chrome_options
-            )
+            if chromedriver_path:
+                driver = webdriver.Chrome(
+                    service=Service(chromedriver_path), options=chrome_options
+                )
+            else:
+                driver = webdriver.Chrome(options=chrome_options)
+                self._log("DBG", "Launched Chrome via Selenium Manager fallback.")
         except Exception:
             driver = webdriver.Chrome(options=chrome_options)
             self._log("DBG", "Launched Chrome via Selenium Manager fallback.")
+
+        self._apply_basic_stealth(driver)
 
         images: list[Image.Image] = []
         slug_for_filename: str | None = None
@@ -782,6 +896,7 @@ class Command(BaseCommand):
                 url = self.page_url(baseurl, i)
                 self._log("INFO", f"Loading page {i}:", url)
                 driver.get(url)
+                self._wait_cloudflare(driver)
                 self._log("DBG", "current_url after GET:", driver.current_url or url)
 
                 if i == 1:
@@ -819,6 +934,7 @@ class Command(BaseCommand):
                     self._log("INFO", "No image on page 1 yet; retrying…")
                     time.sleep(1.0)
                     driver.get(url)
+                    self._wait_cloudflare(driver)
                     self._wait_first_page_ready(driver)
                     img_url = self.pick_image_url(driver)
 
