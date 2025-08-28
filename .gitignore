@@ -1,0 +1,25 @@
+@"
+# Ignore env & secrets
+.env
+*.env
+**/.env
+
+# Ignore sensitive files
+*.key
+*.pem
+*.pfx
+*.cer
+*.crt
+*.der
+secrets.*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Django
+*.sqlite3
+media/
+"@ | Out-File -Encoding UTF8 .gitignore
