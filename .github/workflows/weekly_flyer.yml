@@ -2,28 +2,39 @@ name: Weekly flyer → SharePoint
 
 on:
   schedule:
-    #Every Monday at 05:07 UTC (summer ~ 07:07 Berlin, winter ~ 06:07)
+    # Every Monday at 05:07 UTC
     - cron: "7 5 * * 1"
-  workflow_dispatch: {} #allow manual start
+  workflow_dispatch: {} # allow manual run
 
 jobs:
   run:
-    #use ubuntu VN
     runs-on: ubuntu-latest
+
+    # (Optional) job-level envs
     env:
-    PYTHONUNBUFFERED: "1"
-    GITHUB_ACTIONS: "true"
+      DJANGO_SETTINGS_MODULE: prospektprojekt.settings
+      SECRET_KEY: ${{ secrets.SECRET_KEY }}
+      DEBUG: "False"
+
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      SHAREPOINT_SITE: ${{ secrets.SHAREPOINT_SITE }}
+      SHAREPOINT_FOLDER: ${{ secrets.SHAREPOINT_FOLDER }}
+
+      CHROMEDRIVER: /usr/local/bin/chromedriver
+      RK_PICK: current
+      PYTHONUNBUFFERED: "1" # ok to keep; forces unbuffered Python output
+
     steps:
-      # 1) Download the repo code into the runner
       - name: Checkout
         uses: actions/checkout@v4
-      # 2) Install Python 3.11 on the runner
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
-      # 3) Install Python dependencies
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -33,70 +44,20 @@ jobs:
             pip install django requests pillow selenium python-dotenv msal
           fi
 
-      # 4) Install Chrome & Chromedriver for Selenium
       - name: Setup Google Chrome
         uses: browser-actions/setup-chrome@v1
+
       - name: Setup Chromedriver
         uses: nanasess/setup-chromedriver@v2
 
-        # Show versions for debugging
-      - name: Tool versions
+      - name: Preflight
         run: |
           python --version
           google-chrome --version || true
           chromedriver --version || true
 
-        # 5) Guard: only enforce exact Berlin time when cron triggered.
-      # Manual runs skip this check.
-      - name: Guard for Berlin time 07:07 Monday
-        if: ${{ github.event_name == 'schedule' }}
-        run: |
-          if [ "$(TZ=Europe/Berlin date +'%u %H %M')" != "1 07 07" ]; then
-            echo "Not Monday 07:07 Berlin; skipping run."; exit 0; fi
-
-        # 6) Migrate DB
-      - name: Migrate database
-        env:
-          DJANGO_SETTINGS_MODULE: prospektprojekt.settings
-          SECRET_KEY: ${{ secrets.SECRET_KEY }}
-        run: python manage.py migrate --noinput
-
-      # 7) Run Django management command
       - name: Run Django command(s)
-        env:
-          # Tell Django which settings module to use
-          DJANGO_SETTINGS_MODULE: prospektprojekt.settings
-          #read secrest from repo settings , Actions , secrets
-          SECRET_KEY: ${{ secrets.SECRET_KEY }}
-          DEBUG: "False"
-          # Graph / SharePoint config from repo secrets
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          SHAREPOINT_SITE: ${{ secrets.SHAREPOINT_SITE }}
-          SHAREPOINT_FOLDER: ${{ secrets.SHAREPOINT_FOLDER }}
-
-          RK_PICK:
-            current
-
-            # Tell code where chromedriver is on the runner
-          CHROMEDRIVER: /usr/local/bin/chromedriver
         run: |
-          # LIDL
           python -u manage.py download_lidl_prospekt "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" 6
-          # ALDI NORD
           python -u manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt" 6
-          # ALDI SÜD
           python -u manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt" 6
-
-      # 8)  Upload generated PDFs as artifacts for debugging
-      #    Adjust path to your MEDIA_ROOT if different.
-      - name: Upload PDFs (debug)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: generated-pdfs
-          path: |
-            **/*.pdf
-            media/**/*.pdf
-          if-no-files-found: ignore
