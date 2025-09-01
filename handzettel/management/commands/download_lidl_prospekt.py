@@ -1027,7 +1027,16 @@ class Command(BaseCommand):
         today = datetime.date.today()
         iso_week = today.isocalendar()[1]
         slug = slug_for_filename or self.url_slug(baseurl)
-        filename = f"{market}_{slug}_{today:%Y-%m-%d}.pdf"
+        brand_folder = self.brand_folder_name(market)  # lidl
+        filename_prefix = {
+            "lidl": "LidlProspekt",
+            "aldi_nord": "AldiNordProspekt",
+            "aldi_sued": "AldiSuedProspekt",
+            "kaufland": "KauflandProspekt",
+            "edeka": "EdekaProspekt",
+        }.get(market, "Prospekt")
+
+        filename = f"{filename_prefix}_KW{iso_week:02d}.pdf"  #  LidlProspekt_KW36.pdf
         title = f"{market.replace('_',' ').upper()} – {slug} – {today:%Y-%m-%d}"
         self._log(
             "DBG", f"Model filename: {filename} | title: {title} | market: {market}"
@@ -1197,13 +1206,14 @@ class Command(BaseCommand):
                         f"Folder check failed for '{parent_path}': {r.status_code} {r.text}"
                     )
 
-        subpath = "/".join(sharepoint_folder.split("/")[1:])
-        year_folder = f"{today.year}"
-        kw_folder = f"KW{iso_week:02d}"
-        brand_folder = self.brand_folder_name(market)
-        nested_subpath = "/".join(
-            [p for p in [subpath, brand_folder, year_folder, kw_folder] if p]
-        )
+        subpath = "/".join(
+            sharepoint_folder.split("/")[1:]
+        )  # strip the library ( "Documents")
+        year_folder = f"{today.year}"  # 2025
+        brand_folder = self.brand_folder_name(market)  # lidl
+        nested_subpath = f"{subpath}/{brand_folder}/{year_folder}"
+        # -> NEWSLETTER/09_PROSPEKTE/<Lidl>/<Jahr>
+
         self._log("INFO", "Ensuring nested path (drive root-relative):", nested_subpath)
 
         try:
@@ -1214,7 +1224,10 @@ class Command(BaseCommand):
             return die("Creating/checking folder path failed", e)
 
         try:
-            upload_path = "/".join([nested_subpath, filename])
+            upload_path = "/".join(
+                [nested_subpath, filename]
+            )  # -> …/2025/LIDL_PROSPEKT_KWXX.pdf
+
             self._log("INFO", "Uploading to path:", upload_path)
             upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
             with open(handzettel.datei.path, "rb") as f:
