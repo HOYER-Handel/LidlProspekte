@@ -11,9 +11,6 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-    concurrency:
-      group: weekly-flyer-sharepoint
-      cancel-in-progress: false
 
     env:
       DJANGO_SETTINGS_MODULE: prospektprojekt.settings
@@ -73,18 +70,18 @@ jobs:
 
       - name: Preflight
         run: |
-          python --version
+          python3 --version
           google-chrome --version || true
           chromedriver --version || true
 
       - name: Detect pages
         id: detect
         env:
-          URL: ${{ matrix.url }} # <— changed from matrix.retailer.url
+          URL: ${{ matrix.url }}
         shell: bash
         run: |
           set -e
-          PAGES=$(python - <<'PY'
+          PAGES=$(python3 - <<'PY'
           import os, re, time
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
@@ -151,4 +148,4 @@ jobs:
         env:
           PAGES: ${{ steps.detect.outputs.pages }}
         run: |
-          python manage.py download_lidl_prospekt "${{ matrix.url }}" "$PAGES"
+          python3 manage.py download_lidl_prospekt "${{ matrix.url }}" "$PAGES"
