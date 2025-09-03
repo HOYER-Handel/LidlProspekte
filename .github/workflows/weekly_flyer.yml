@@ -5,9 +5,9 @@ on:
     # Europe/Berlin 05:07 all year:
     #  - CEST (UTC+2) -> 03:07 UTC
     #  - CET  (UTC+1) -> 04:07 UTC
-    - cron: '7 3 * * 1'
-    - cron: '7 4 * * 1'
-  workflow_dispatch: {}  # allow manual run
+    - cron: "7 3 * * 1"
+    - cron: "7 4 * * 1"
+  workflow_dispatch: {} # allow manual run
 
 jobs:
   run:
@@ -36,7 +36,7 @@ jobs:
 
     steps:
       # Guard step FIRST: only proceed when local Berlin time is 05:07
-      - name: Guard: only run at 05:07 Europe/Berlin
+      - name: "Guard: only run at 05:07 Europe/Berlin"
         id: guard
         env:
           GH_EVENT: ${{ github.event_name }}
@@ -69,7 +69,7 @@ jobs:
           python3 -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             python3 -m pip install -r requirements.txt
-          else:
+          else
             python3 -m pip install django requests pillow selenium python-dotenv msal
           fi
 
