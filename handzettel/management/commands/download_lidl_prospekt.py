@@ -939,7 +939,15 @@ class Command(BaseCommand):
 
         # loop through pages
         try:
+            # stop early after a few empty pages in a row
+            miss_streak = 0
+            MISS_LIMIT = int(os.getenv("MISS_LIMIT", "3"))
+
             for i in range(1, pages + 1):
+                page_got_image = (
+                    False  # track if we actually captured something this loop
+                )
+
                 url = self.page_url(baseurl, i)
                 self._log("INFO", f"Loading page {i}:", url)
                 driver.get(url)
@@ -967,6 +975,7 @@ class Command(BaseCommand):
                         slug_for_filename,
                     )
 
+                # wait a bit for images to render
                 try:
                     WebDriverWait(driver, 8).until(
                         EC.presence_of_element_located((By.TAG_NAME, "img"))
@@ -975,8 +984,10 @@ class Command(BaseCommand):
                     pass
                 time.sleep(1.0)
 
+                # 1) try to find a direct image URL
                 img_url = self.pick_image_url(driver)
 
+                # if page 1 is still empty, reload once and re-try
                 if not img_url and i == 1:
                     self._log("INFO", "No image on page 1 yet; retrying…")
                     time.sleep(1.0)
@@ -985,56 +996,82 @@ class Command(BaseCommand):
                     self._wait_first_page_ready(driver)
                     img_url = self.pick_image_url(driver)
 
-                if not img_url:
-                    self._log("INFO", "No image found on this page.")
-                    continue
-
-                hi_url = (
-                    re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
-                    if "/public/gimg/" in img_url
-                    else img_url
-                )
-                self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
-
-                try:
-                    r = requests.get(hi_url, timeout=20)
-                    self._log(
-                        "DBG",
-                        "GET",
-                        hi_url,
-                        "->",
-                        r.status_code,
-                        "lenHdr=",
-                        len(r.content) if r.ok else 0,
-                    )
-                    if r.status_code == 200 and r.content:
-                        images.append(Image.open(BytesIO(r.content)).convert("RGB"))
-                        import hashlib
-
-                        md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
-                        self._log(
-                            "DBG", "Downloaded bytes:", len(r.content), "md5=", md5
-                        )
-                        self._log(
-                            "INFO", f"Page {i}: added image. Total now {len(images)}"
-                        )
-                        continue
-                except Exception as e:
-                    self._log("DBG", "Direct GET failed:", e)
-
-                self._log("INFO", "Direct download failed; trying visual fallback…")
-                png_bytes = self._capture_best_visual(driver)
-                if png_bytes:
+                # 2) direct HTTP download (with RK hi-res bump)
+                if img_url:
                     try:
-                        images.append(Image.open(BytesIO(png_bytes)).convert("RGB"))
+                        if "/public/gimg/" in img_url:
+                            hi_url = re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
+                        else:
+                            hi_url = img_url
+
+                        self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
+
+                        r = requests.get(hi_url, timeout=20)
                         self._log(
-                            "INFO",
-                            f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                            "DBG",
+                            "GET",
+                            hi_url,
+                            "->",
+                            r.status_code,
+                            "lenHdr=",
+                            len(r.content) if r.ok else 0,
                         )
-                    except Exception:
-                        self._log("INFO", "Could not decode fallback visual.")
+
+                        if r.status_code == 200 and r.content:
+                            images.append(Image.open(BytesIO(r.content)).convert("RGB"))
+                            import hashlib
+
+                            md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
+                            self._log(
+                                "DBG", "Downloaded bytes:", len(r.content), "md5=", md5
+                            )
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added image. Total now {len(images)}",
+                            )
+                            page_got_image = True
+                        else:
+                            self._log(
+                                "INFO",
+                                "Direct download returned non-200 or empty body.",
+                            )
+                    except Exception as e:
+                        self._log("DBG", "Direct GET failed:", e)
                 else:
-                    self._log("INFO", "No visual content captured on this page.")
+                    self._log("INFO", "No image URL found on this page.")
+
+                # 3) fallback: element/viewport screenshot if no direct image captured
+                if not page_got_image:
+                    self._log("INFO", "Direct download failed; trying visual fallback…")
+                    png_bytes = self._capture_best_visual(driver)
+                    if png_bytes:
+                        try:
+                            images.append(Image.open(BytesIO(png_bytes)).convert("RGB"))
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                            )
+                            page_got_image = True
+                        except Exception:
+                            self._log("INFO", "Could not decode fallback visual.")
+                    else:
+                        self._log("INFO", "No visual content captured on this page.")
+
+                # 4) early-stop check
+                if page_got_image:
+                    miss_streak = 0
+                else:
+                    miss_streak += 1
+                    self._log(
+                        "INFO",
+                        f"No page image detected (miss {miss_streak}/{MISS_LIMIT}).",
+                    )
+                    if miss_streak >= MISS_LIMIT:
+                        self._log(
+                            "INFO", "Reached the end (no more pages). Stopping early."
+                        )
+                        break
+
         finally:
             try:
                 driver.quit()

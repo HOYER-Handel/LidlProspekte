@@ -25,7 +25,8 @@ jobs:
       CHROMEDRIVER: /usr/local/bin/chromedriver
       RK_PICK: current
       PYTHONUNBUFFERED: "1" # ok to keep; forces unbuffered Python output
-      PAGES: "80"
+      PAGES: "90"
+      MISS_LIMIT: "3" #stop after 3 empty pages in a row
 
     steps:
       - name: Checkout
