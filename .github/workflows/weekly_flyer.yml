@@ -1,38 +1,41 @@
-name: Weekly flyer → SharePoint
+name: "Weekly flyer → SharePoint"
 
 on:
   schedule:
     # Europe/Berlin 05:07 all year:
     #  - CEST (UTC+2) -> 03:07 UTC
     #  - CET  (UTC+1) -> 04:07 UTC
-   - cron: '7 3 * * 1'
-   - cron: '7 4 * * 1'
-  workflow_dispatch: {} # allow manual run
+    - cron: '7 3 * * 1'
+    - cron: '7 4 * * 1'
+  workflow_dispatch: {}  # allow manual run
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     env:
-    #django app
+      # Django / app
       DJANGO_SETTINGS_MODULE: prospektprojekt.settings
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
       DEBUG: "False"
-    #SharePoint/ Azure
+
+      # SharePoint / Azure
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       SHAREPOINT_SITE: ${{ secrets.SHAREPOINT_SITE }}
       SHAREPOINT_FOLDER: ${{ secrets.SHAREPOINT_FOLDER }}
 
+      # Scraper behavior
       CHROMEDRIVER: /usr/local/bin/chromedriver
       RK_PICK: current
-      PYTHONUNBUFFERED: "1" # ok to keep; forces unbuffered Python output
+      PYTHONUNBUFFERED: "1"
       PAGES: "90"
-      MISS_LIMIT: "3" #stop after 3 empty pages in a row
-      DUP_LIMIT: "2" #stop if the same page repaets twice
+      MISS_LIMIT: "3"
+      DUP_LIMIT: "2"
 
     steps:
-     # Guard step FIRST: only proceed when local Berlin time is 05:07
+      # Guard step FIRST: only proceed when local Berlin time is 05:07
       - name: Guard: only run at 05:07 Europe/Berlin
         id: guard
         env:
@@ -66,7 +69,7 @@ jobs:
           python3 -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             python3 -m pip install -r requirements.txt
-          else
+          else:
             python3 -m pip install django requests pillow selenium python-dotenv msal
           fi
 
@@ -81,7 +84,7 @@ jobs:
       - name: Preflight
         if: steps.guard.outputs.run == 'true'
         run: |
-          python --version
+          python3 --version
           google-chrome --version || true
           chromedriver --version || true
 
