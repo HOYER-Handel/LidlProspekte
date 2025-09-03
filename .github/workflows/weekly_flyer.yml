@@ -9,6 +9,12 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    concurrency:
+      group: weekly-flyer-SharePoint
+      cancel-in-progress: false
 
     # (Optional) job-level envs
     env:
@@ -26,6 +32,17 @@ jobs:
       RK_PICK: current
       PYTHONUNBUFFERED: "1" # ok to keep; forces unbuffered Python output
 
+      strategy:
+      fail-fast: false
+      matrix:
+        retailer:
+          - name: lidl
+            url: https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt
+          - name: aldi_nord
+            url: https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt
+          - name: aldi_sued
+            url: https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,6 +51,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
@@ -56,8 +81,93 @@ jobs:
           google-chrome --version || true
           chromedriver --version || true
 
-      - name: Run Django command(s)
+      # --- Auto-detect pages for this retailer URL (lightweight, robust) ---
+      - name: Detect pages
+        id: detect
+        env:
+          URL: ${{ matrix.retailer.url }}
+        shell: bash
         run: |
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" 6
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt" 6
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt" 6
+          set -e
+
+          PAGES=$(python - <<'PY'
+          import os, re, time
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.common.by import By
+          from selenium.webdriver.support.ui import WebDriverWait
+          from selenium.webdriver.support import expected_conditions as EC
+
+          url = os.environ["URL"]
+
+          def configure():
+              opts = Options()
+              opts.add_argument("--headless=new")
+              opts.add_argument("--window-size=1920,1080")
+              opts.add_argument("--disable-gpu")
+              opts.add_argument("--no-sandbox")
+              opts.add_argument("--disable-dev-shm-usage")
+              return opts
+
+          def page_url(base, n):
+              if "lidl.de" in base:
+                  if re.search(r"/page/\\d+", base):
+                      return re.sub(r"/page/\\d+", f"/page/{n}", base)
+                  parts = base.split("?", 1)
+                  path = parts[0].rstrip("/")
+                  query = f"?{parts[1]}" if len(parts) == 2 else ""
+                  return f"{path}/page/{n}{query}"
+              if re.search(r"#page_\\d+", base):
+                  return re.sub(r"#page_\\d+", f"#page_{n}", base)
+              return f"{base}#page_{n}"
+
+          driver = webdriver.Chrome(options=configure())
+          max_pages = 0
+          try:
+              # Try page 1..80; stop at the first page without a big image
+              for n in range(1, 81):
+                  u = page_url(url, n)
+                  driver.get(u)
+                  try:
+                      WebDriverWait(driver, 6).until(EC.presence_of_element_located((By.TAG_NAME, "img")))
+                      time.sleep(0.4)
+                  except Exception:
+                      pass
+
+                  found = False
+                  for img in driver.find_elements(By.TAG_NAME, "img"):
+                      try:
+                          src = (img.get_attribute("currentSrc") or img.get_attribute("src") or "").lower()
+                          w = int(img.get_attribute("naturalWidth") or 0)
+                          h = int(img.get_attribute("naturalHeight") or 0)
+                          # rabatt-kompass page images or generally big images
+                          if ("/public/gimg/" in src and w >= 400 and h >= 600) or (w >= 800 and h >= 1000):
+                              found = True
+                              break
+                      except Exception:
+                          pass
+
+                  if found:
+                      max_pages = n
+                  else:
+                      break
+          finally:
+              driver.quit()
+
+          # Reasonable fallback if nothing was detected
+          if max_pages == 0:
+              max_pages = 6
+
+          print(max_pages)
+          PY
+          )
+
+          echo "pages=$PAGES" >> "$GITHUB_OUTPUT"
+          echo "Detected pages: $PAGES"
+
+      # --- Run your Django command with detected pages for this retailer ---
+      - name: Run Django command
+        env:
+          PAGES: ${{ steps.detect.outputs.pages }}
+        run: |
+          python manage.py download_lidl_prospekt "${{ matrix.retailer.url }}" "$PAGES"
