@@ -2,20 +2,22 @@ name: Weekly flyer → SharePoint
 
 on:
   schedule:
-    # Every Monday at 05:07 UTC
-    - cron: "7 5 * * 1"
+    # Europe/Berlin 05:07 all year:
+    #  - CEST (UTC+2) -> 03:07 UTC
+    #  - CET  (UTC+1) -> 04:07 UTC
+   - cron: '7 3 * * 1'
+   - cron: '7 4 * * 1'
   workflow_dispatch: {} # allow manual run
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
-    # (Optional) job-level envs
     env:
+    #django app
       DJANGO_SETTINGS_MODULE: prospektprojekt.settings
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
       DEBUG: "False"
-
+    #SharePoint/ Azure
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -27,39 +29,65 @@ jobs:
       PYTHONUNBUFFERED: "1" # ok to keep; forces unbuffered Python output
       PAGES: "90"
       MISS_LIMIT: "3" #stop after 3 empty pages in a row
+      DUP_LIMIT: "2" #stop if the same page repaets twice
 
     steps:
+     # Guard step FIRST: only proceed when local Berlin time is 05:07
+      - name: Guard: only run at 05:07 Europe/Berlin
+        id: guard
+        env:
+          GH_EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$GH_EVENT" != "schedule" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          now=$(TZ=Europe/Berlin date +%H%M)
+          echo "Local time Europe/Berlin: $now"
+          if [ "$now" = "0507" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
+        if: steps.guard.outputs.run == 'true'
         uses: actions/checkout@v4
 
       - name: Setup Python
+        if: steps.guard.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
+        if: steps.guard.outputs.run == 'true'
         run: |
-          python -m pip install --upgrade pip
+          python3 -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
+            python3 -m pip install -r requirements.txt
           else
-            pip install django requests pillow selenium python-dotenv msal
+            python3 -m pip install django requests pillow selenium python-dotenv msal
           fi
 
       - name: Setup Google Chrome
+        if: steps.guard.outputs.run == 'true'
         uses: browser-actions/setup-chrome@v1
 
       - name: Setup Chromedriver
+        if: steps.guard.outputs.run == 'true'
         uses: nanasess/setup-chromedriver@v2
 
       - name: Preflight
+        if: steps.guard.outputs.run == 'true'
         run: |
           python --version
           google-chrome --version || true
           chromedriver --version || true
 
-      - name: Run Django command(s)
+      - name: Run Django commands
+        if: steps.guard.outputs.run == 'true'
         run: |
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" "$PAGES"
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt" "$PAGES"
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt" "$PAGES"
+          python3 manage.py download_lidl_prospekt "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" "$PAGES"
+          python3 manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt" "$PAGES"
+          python3 manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt" "$PAGES"

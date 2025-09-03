@@ -4,6 +4,7 @@
 import re, time, datetime, json, urllib.parse
 from io import BytesIO
 from urllib.parse import urlparse
+import hashlib
 
 import requests
 from PIL import Image
@@ -943,6 +944,11 @@ class Command(BaseCommand):
             miss_streak = 0
             MISS_LIMIT = int(os.getenv("MISS_LIMIT", "3"))
 
+            #  detect duplicate pages
+            last_fp = None
+            dup_streak = 0
+            DUP_LIMIT = int(os.getenv("DUP_LIMIT", "2"))
+
             for i in range(1, pages + 1):
                 page_got_image = (
                     False  # track if we actually captured something this loop
@@ -1018,18 +1024,32 @@ class Command(BaseCommand):
                         )
 
                         if r.status_code == 200 and r.content:
-                            images.append(Image.open(BytesIO(r.content)).convert("RGB"))
-                            import hashlib
+                            fp = hashlib.md5(r.content[:200000]).hexdigest()[:16]
+                            if i > 1 and fp == last_fp:
+                                dup_streak += 1
+                                self._log(
+                                    "INFO",
+                                    f"Duplicate content of previous page (dup {dup_streak}/{DUP_LIMIT}).",
+                                )
+                                page_got_image = False
+                                if dup_streak >= DUP_LIMIT:
+                                    self._log(
+                                        "INFO",
+                                        "Repeated same page content; assuming end. Stopping early.",
+                                    )
+                                    break
+                            else:
+                                images.append(
+                                    Image.open(BytesIO(r.content)).convert("RGB")
+                                )
+                                self._log(
+                                    "INFO",
+                                    f"Page {i}: added image. Total now {len(images)}",
+                                )
+                                last_fp = fp
+                                dup_streak = 0
+                                page_got_image = True
 
-                            md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
-                            self._log(
-                                "DBG", "Downloaded bytes:", len(r.content), "md5=", md5
-                            )
-                            self._log(
-                                "INFO",
-                                f"Page {i}: added image. Total now {len(images)}",
-                            )
-                            page_got_image = True
                         else:
                             self._log(
                                 "INFO",
@@ -1046,12 +1066,31 @@ class Command(BaseCommand):
                     png_bytes = self._capture_best_visual(driver)
                     if png_bytes:
                         try:
-                            images.append(Image.open(BytesIO(png_bytes)).convert("RGB"))
-                            self._log(
-                                "INFO",
-                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
-                            )
-                            page_got_image = True
+                            fp = hashlib.md5(png_bytes[:200000]).hexdigest()[:16]
+                            if i > 1 and fp == last_fp:
+                                dup_streak += 1
+                                self._log(
+                                    "INFO",
+                                    f"Fallback duplicate of previous page (dup {dup_streak}/{DUP_LIMIT}).",
+                                )
+                                page_got_image = False
+                                if dup_streak >= DUP_LIMIT:
+                                    self._log(
+                                        "INFO",
+                                        "Repeated same fallback; assuming end. Stopping early.",
+                                    )
+                                    break
+                            else:
+                                images.append(
+                                    Image.open(BytesIO(png_bytes)).convert("RGB")
+                                )
+                                self._log(
+                                    "INFO",
+                                    f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                                )
+                                last_fp = fp
+                                dup_streak = 0
+                                page_got_image = True
                         except Exception:
                             self._log("INFO", "Could not decode fallback visual.")
                     else:
