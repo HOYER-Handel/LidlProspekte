@@ -1,7 +1,7 @@
 # This Python class downloads flyer images from websites, creates a PDF from the images, saves the PDF
 # to a model, and uploads the PDF to SharePoint using the Microsoft Graph API.
 
-import re, time, datetime, json, urllib.parse
+import re, time, datetime, json, urllib.parse, hashlib
 from io import BytesIO
 from urllib.parse import urlparse
 
@@ -13,6 +13,7 @@ from django.core.files.base import ContentFile
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+import selenium  # for version-based quirks if ever needed
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -111,7 +112,6 @@ class Command(BaseCommand):
     # it pauses script while Cloudflare is showing the "just a moment"bot check page, then contines once the real page is ready
     # This function waits just long enough so the real content can load
     def _wait_cloudflare(self, driver, max_wait=25):
-        """Wait through Cloudflare 'Just a moment…' challenge."""
         start = time.time()
         while time.time() - start < max_wait:
             url = driver.current_url or ""
@@ -298,14 +298,12 @@ class Command(BaseCommand):
                 b += 20
                 why.append("phrase:kw+20")
 
-        if retailer_hint == "lidl":
-            if "lidl" in blob:
-                b += 25
-                why.append("retailer:lidl+25")
-        elif retailer_hint == "aldi":
-            if "aldi" in blob:
-                b += 25
-                why.append("retailer:aldi+25")
+        if retailer_hint == "lidl" and "lidl" in blob:
+            b += 25
+            why.append("retailer:lidl+25")
+        elif retailer_hint == "aldi" and "aldi" in blob:
+            b += 25
+            why.append("retailer:aldi+25")
 
         return b, why
 
@@ -322,8 +320,7 @@ class Command(BaseCommand):
             add = min(2000, (pid // 10) % 3000)
             return add, f"id(latest):{pid}(+{add})"
         else:
-            # tiny nudge only; prevents "always last flyer"
-            add = (pid % 13) - 6  # -6..+6
+            add = (pid % 13) - 6
             return add, f"id(light):{pid}(+{add})"
 
     # Inputs: a: the link element form Selenium,retailer_hint:which store lidl or aldi,mode:"current","upcoming"or "latest"
@@ -344,7 +341,6 @@ class Command(BaseCommand):
         blob = " ".join([title, text, card]).lower()
 
         s, reasons = 0, []
-
         if retailer_hint and retailer_hint in blob:
             s += 10
             reasons.append("retailer+10")
@@ -441,14 +437,12 @@ class Command(BaseCommand):
                     reason.append(f"viewer:upcoming+{b}")
                 else:
                     status = "past"
-                    b = -700
-                    bonus += b
+                    bonus += -700
                     reason.append("viewer:past-700")
             elif start and not end:
                 if today >= start:
                     status = "current"
-                    b = 1600
-                    bonus += b
+                    bonus += 1600
                     reason.append("viewer:ab_current+1600")
                 else:
                     status = "upcoming"
@@ -457,7 +451,6 @@ class Command(BaseCommand):
                     bonus += b
                     reason.append(f"viewer:ab_upcoming+{b}")
             else:
-                # no dates at all -> lean on phrases
                 if is_vorschau:
                     status = "upcoming"
                     bonus += 900
@@ -648,7 +641,64 @@ class Command(BaseCommand):
         except Exception:
             return None
 
-    # --- Download one image from a URL and return it as a PIL Image.--
+    # --- Page numbering helpers & total detection ---
+    def _current_page_from_url(self, url: str) -> int | None:
+        m = re.search(r"(?:#page_|/page/)(\d+)", url or "")
+        return int(m.group(1)) if m else None
+
+    def _detect_total_pages(self, driver) -> int | None:
+        try:
+            html = driver.page_source or ""
+        except Exception:
+            html = ""
+
+        m = re.search(r"(?:Seite|Page)\s*\d+\s*/\s*(\d{1,3})", html, re.I)
+        if m:
+            return int(m.group(1))
+
+        for key in ("pageCount", "totalPages", "pagesTotal", "numPages"):
+            m = re.search(rf'"{key}"\s*:\s*(\d{{1,3}})', html)
+            if m:
+                return int(m.group(1))
+
+        try:
+            thumbs = driver.find_elements(By.CSS_SELECTOR, "a[href*='#page_']")
+            nums = []
+            for a in thumbs:
+                href = a.get_attribute("href") or ""
+                mm = re.search(r"#page_(\d+)", href)
+                if mm:
+                    nums.append(int(mm.group(1)))
+            if nums:
+                return max(nums)
+        except Exception:
+            pass
+
+        return None
+
+    # --- Perceptual hash (dHash) for visual-duplicate stop ---
+    def _img_dhash(self, img: Image.Image) -> int:
+        """8x8 perceptual dHash (64-bit)."""
+        # Pillow keeps Image.LANCZOS for backward compat; if using PIL>=10, Resampling.LANCZOS also works.
+        small = img.convert("L").resize((9, 8), Image.LANCZOS)
+        px = list(small.getdata())
+        bits = 0
+        for r in range(8):
+            row = r * 9
+            for c in range(8):
+                bits = (bits << 1) | (1 if px[row + c] > px[row + c + 1] else 0)
+        return bits
+
+    def _ham(self, a: int, b: int) -> int:
+        """Hamming distance between two 64-bit integers."""
+        x = a ^ b
+        cnt = 0
+        while x:
+            x &= x - 1
+            cnt += 1
+        return cnt
+
+    # --- Direct image fetch (kept for completeness) ---
     def fetch_image(self, url: str) -> Image.Image | None:
         try:
             # simple request get
@@ -763,11 +813,10 @@ class Command(BaseCommand):
                         verified = []
                         for href in raw[:12]:
                             det = self._inspect_viewer_details(tmp_driver, href)
-                            total = det["bonus"]
                             verified.append(
                                 {
                                     "href": href,
-                                    "total": total,
+                                    "total": det["bonus"],
                                     "status": det["status"],
                                     "start": det["start"],
                                     "end": det["end"],
@@ -788,7 +837,6 @@ class Command(BaseCommand):
                                 or pick_by_status("unknown")
                                 or pick_by_status("upcoming")
                             )
-
                         elif rk_pick_mode == "upcoming":
                             upcoming = [
                                 v for v in verified if v["status"] == "upcoming"
@@ -806,7 +854,7 @@ class Command(BaseCommand):
                                 choice = pick_by_status("upcoming") or pick_by_status(
                                     "current"
                                 )
-                        else:  # latest
+                        else:
                             verified.sort(
                                 key=lambda v: int(
                                     re.search(r"/prospekt-(\d+)-0", v["href"]).group(1)
@@ -897,15 +945,6 @@ class Command(BaseCommand):
                             choice = verified[0]
 
                         best_href = choice["href"] if choice else top[0][1]
-                        self._log("DBG", "Overview verify dump:")
-                        for v in verified:
-                            pid = re.search(r"/prospekt-(\d+)-0", v["href"])
-                            pid = pid.group(1) if pid else "-"
-                            self._log(
-                                "DBG",
-                                f"  id={pid} status={v['status']} overview={v.get('overview_score','-')} "
-                                f"bonus={v.get('viewer_bonus','-')} total={v['total']} :: {v['href']}",
-                            )
                         self._log("INFO", "Redirecting to viewer:", best_href)
                         baseurl = best_href
                         resolved_slug = self.viewer_slug(best_href)
@@ -933,20 +972,41 @@ class Command(BaseCommand):
 
         images: list[Image.Image] = []
         slug_for_filename: str | None = None
+        found_total_pages: int | None = None
+        last_fp: int | None = None  # perceptual fingerprint of previous page (dHash)
 
         # loop through pages
         try:
             for i in range(1, pages + 1):
+                # Stop if we already know the true total count
+                if found_total_pages and i > found_total_pages:
+                    self._log(
+                        "INFO",
+                        f"Stopping at page {found_total_pages} (detected total).",
+                    )
+                    break
+
                 url = self.page_url(baseurl, i)
                 self._log("INFO", f"Loading page {i}:", url)
                 driver.get(url)
                 self._wait_cloudflare(driver)
                 self._log("DBG", "current_url after GET:", driver.current_url or url)
 
+                # If viewer clamped (e.g., requested 46, showing 45)
+                try:
+                    actual = self._current_page_from_url(driver.current_url or url)
+                    if actual is not None and actual < i:
+                        found_total_pages = actual
+                        self._log("INFO", f"Viewer clamped at page {actual}. Stopping.")
+                        break
+                except Exception:
+                    pass
+
                 if i == 1:
                     self.accept_cookies_if_present(driver)
                     self._wait_first_page_ready(driver)
 
+                    # filename slug
                     current = driver.current_url or baseurl
                     candidate_viewer = resolved_slug or self.viewer_slug(current)
                     overview_slug = self.url_slug(original_input)
@@ -964,6 +1024,17 @@ class Command(BaseCommand):
                         slug_for_filename,
                     )
 
+                    # Try to detect the real total pages from page 1
+                    try:
+                        detected = self._detect_total_pages(driver)
+                        if detected and detected > 0:
+                            found_total_pages = detected
+                            self._log(
+                                "INFO", f"Detected total pages: {found_total_pages}"
+                            )
+                    except Exception:
+                        pass
+
                 try:
                     WebDriverWait(driver, 8).until(
                         EC.presence_of_element_located((By.TAG_NAME, "img"))
@@ -974,18 +1045,47 @@ class Command(BaseCommand):
 
                 img_url = self.pick_image_url(driver)
 
-                if not img_url and i == 1:
-                    self._log("INFO", "No image on page 1 yet; retrying…")
-                    time.sleep(1.0)
-                    driver.get(url)
-                    self._wait_cloudflare(driver)
-                    self._wait_first_page_ready(driver)
-                    img_url = self.pick_image_url(driver)
-
+                # If no direct image URL -> try visual fallback before deciding to stop
                 if not img_url:
-                    self._log("INFO", "No image found on this page.")
-                    continue
+                    self._log("INFO", "No direct image URL; trying visual fallback…")
+                    png_bytes = self._capture_best_visual(driver)
+                    if png_bytes:
+                        try:
+                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
+                            fp = self._img_dhash(img)
+                            if (
+                                i > 1
+                                and last_fp is not None
+                                and self._ham(fp, last_fp) <= 2
+                            ):
+                                found_total_pages = i - 1
+                                self._log(
+                                    "INFO",
+                                    f"Visually same as page {found_total_pages}. Stopping.",
+                                )
+                                break
+                            last_fp = fp
+                            images.append(img)
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                            )
+                            continue
+                        except Exception:
+                            self._log("INFO", "Could not decode fallback visual.")
+                            self._log(
+                                "INFO",
+                                f"No usable visual content on page {i}. Stopping.",
+                            )
+                            break
+                    else:
+                        self._log(
+                            "INFO",
+                            f"No visual content captured on page {i}. Stopping here.",
+                        )
+                        break
 
+                # We have an image URL → try high-res and GET
                 hi_url = (
                     re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
                     if "/public/gimg/" in img_url
@@ -1005,33 +1105,74 @@ class Command(BaseCommand):
                         len(r.content) if r.ok else 0,
                     )
                     if r.status_code == 200 and r.content:
-                        images.append(Image.open(BytesIO(r.content)).convert("RGB"))
-                        import hashlib
+                        # Perceptual duplicate check (visual)
+                        try:
+                            img = Image.open(BytesIO(r.content)).convert("RGB")
+                        except Exception:
+                            img = None
+                        if img is not None:
+                            fp = self._img_dhash(img)
+                            if (
+                                i > 1
+                                and last_fp is not None
+                                and self._ham(fp, last_fp) <= 2
+                            ):
+                                found_total_pages = i - 1
+                                self._log(
+                                    "INFO",
+                                    f"Visually same as page {found_total_pages}. Stopping.",
+                                )
+                                break
+                            last_fp = fp
 
-                        md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
-                        self._log(
-                            "DBG", "Downloaded bytes:", len(r.content), "md5=", md5
-                        )
-                        self._log(
-                            "INFO", f"Page {i}: added image. Total now {len(images)}"
-                        )
-                        continue
+                            # optional MD5 for debugging logs
+                            md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
+                            self._log(
+                                "DBG", "Downloaded bytes:", len(r.content), "md5=", md5
+                            )
+
+                            images.append(img)
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added image. Total now {len(images)}",
+                            )
+                            continue
                 except Exception as e:
                     self._log("DBG", "Direct GET failed:", e)
 
+                # Direct GET failed or empty -> try visual fallback
                 self._log("INFO", "Direct download failed; trying visual fallback…")
                 png_bytes = self._capture_best_visual(driver)
                 if png_bytes:
                     try:
-                        images.append(Image.open(BytesIO(png_bytes)).convert("RGB"))
+                        img = Image.open(BytesIO(png_bytes)).convert("RGB")
+                        fp = self._img_dhash(img)
+                        if (
+                            i > 1
+                            and last_fp is not None
+                            and self._ham(fp, last_fp) <= 2
+                        ):
+                            found_total_pages = i - 1
+                            self._log(
+                                "INFO",
+                                f"Visually same as page {found_total_pages}. Stopping.",
+                            )
+                            break
+                        last_fp = fp
+                        images.append(img)
                         self._log(
                             "INFO",
                             f"Page {i}: added fallback screenshot. Total now {len(images)}",
                         )
+                        continue
                     except Exception:
                         self._log("INFO", "Could not decode fallback visual.")
                 else:
-                    self._log("INFO", "No visual content captured on this page.")
+                    self._log(
+                        "INFO",
+                        f"No visual content captured on page {i}. Stopping here.",
+                    )
+                    break
         finally:
             try:
                 driver.quit()
@@ -1071,7 +1212,7 @@ class Command(BaseCommand):
         today = datetime.date.today()
         iso_week = today.isocalendar()[1]
         slug = slug_for_filename or self.url_slug(baseurl)
-        brand_folder = self.brand_folder_name(market)  # lidl
+        brand_folder = self.brand_folder_name(market)
         filename_prefix = {
             "lidl": "LidlProspekt",
             "aldi_nord": "AldiNordProspekt",
@@ -1080,7 +1221,7 @@ class Command(BaseCommand):
             "edeka": "EdekaProspekt",
         }.get(market, "Prospekt")
 
-        filename = f"{filename_prefix}_KW{iso_week:02d}.pdf"  #  LidlProspekt_KW36.pdf
+        filename = f"{filename_prefix}_KW{iso_week:02d}.pdf"
         title = f"{market.replace('_',' ').upper()} – {slug} – {today:%Y-%m-%d}"
         self._log(
             "DBG", f"Model filename: {filename} | title: {title} | market: {market}"
@@ -1250,13 +1391,10 @@ class Command(BaseCommand):
                         f"Folder check failed for '{parent_path}': {r.status_code} {r.text}"
                     )
 
-        subpath = "/".join(
-            sharepoint_folder.split("/")[1:]
-        )  # strip the library ( "Documents")
-        year_folder = f"{today.year}"  # 2025
-        brand_folder = self.brand_folder_name(market)  # lidl
+        subpath = "/".join(sharepoint_folder.split("/")[1:])
+        year_folder = f"{today.year}"
+        brand_folder = self.brand_folder_name(market)
         nested_subpath = f"{subpath}/{brand_folder}/{year_folder}"
-        # -> NEWSLETTER/09_PROSPEKTE/<Lidl>/<Jahr>
 
         self._log("INFO", "Ensuring nested path (drive root-relative):", nested_subpath)
 
@@ -1268,10 +1406,7 @@ class Command(BaseCommand):
             return die("Creating/checking folder path failed", e)
 
         try:
-            upload_path = "/".join(
-                [nested_subpath, filename]
-            )  # -> …/2025/LIDL_PROSPEKT_KWXX.pdf
-
+            upload_path = "/".join([nested_subpath, filename])
             self._log("INFO", "Uploading to path:", upload_path)
             upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
             with open(handzettel.datei.path, "rb") as f:

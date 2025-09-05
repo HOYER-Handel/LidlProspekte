@@ -2,15 +2,18 @@ name: Weekly flyer → SharePoint
 
 on:
   schedule:
-    # Every Monday at 05:07 UTC
+    # Every Monday at 05:07 UTC (06:07 CET / 07:07 CEST in Berlin)
     - cron: "7 5 * * 1"
-  workflow_dispatch: {} # allow manual run
+  workflow_dispatch: {}
+
+concurrency:
+  group: weekly-flyer
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
-    # (Optional) job-level envs
     env:
       DJANGO_SETTINGS_MODULE: prospektprojekt.settings
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
@@ -24,7 +27,26 @@ jobs:
 
       CHROMEDRIVER: /usr/local/bin/chromedriver
       RK_PICK: current
-      PYTHONUNBUFFERED: "1" # ok to keep; forces unbuffered Python output
+      PYTHONUNBUFFERED: "1"
+      # For log timestamps (cron remains UTC regardless)
+      TZ: Europe/Berlin
+
+    strategy:
+      fail-fast: false
+      matrix:
+        flyer:
+          - {
+              url: "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt",
+              pages: 120,
+            }
+          - {
+              url: "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt",
+              pages: 120,
+            }
+          - {
+              url: "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt",
+              pages: 120,
+            }
 
     steps:
       - name: Checkout
@@ -34,6 +56,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
@@ -56,8 +79,6 @@ jobs:
           google-chrome --version || true
           chromedriver --version || true
 
-      - name: Run Django command(s)
+      - name: Run Django command
         run: |
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" 3
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt" 3
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt" 45
+          python manage.py download_lidl_prospekt "${{ matrix.flyer.url }}" ${{ matrix.flyer.pages }}
