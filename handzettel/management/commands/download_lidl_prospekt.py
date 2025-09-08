@@ -78,6 +78,9 @@ class Command(BaseCommand):
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--lang=de-DE")
+        opts.add_experimental_option("prefs", {"intl.accept_languages": "de,de-DE"})
+
         ua = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -606,7 +609,7 @@ class Command(BaseCommand):
 
     # ---------- RK viewer context & navigation ----------
     def _enter_rk_viewer_frame(self, driver) -> bool:
-        """Try to switch into the rabatt-kompass viewer iframe."""
+        """Try to switch into the rabatt-kompass viewer iframe and STAY there."""
         driver.switch_to.default_content()
         frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
         for idx, f in enumerate(frames):
@@ -617,11 +620,10 @@ class Command(BaseCommand):
                 )
                 if ok:
                     self._log("DBG", f"Entered viewer iframe #{idx}")
-                    return True
+                    return True  # <— stay in the iframe
             except Exception:
                 pass
-            finally:
-                driver.switch_to.default_content()
+            driver.switch_to.default_content()  # only go back if NOT a match
         return False
 
     def _switch_to_viewer_context(self, driver) -> None:
@@ -641,7 +643,7 @@ class Command(BaseCommand):
     def _goto_rk_page_in_context(self, driver, n: int) -> None:
         """Navigate to page n within the current browsing context (top or frame)."""
         # 1) Click thumbnail when available
-        thumbs = driver.find_elements(By.CSS_SELECTOR, f"a[href$='#page_{n}']")
+        thumbs = driver.find_elements(By.CSS_SELECTOR, f"a[href*='#page_{n}']")
         if thumbs:
             try:
                 driver.execute_script(
@@ -717,6 +719,7 @@ class Command(BaseCommand):
         except Exception:
             pass
         s.headers["Referer"] = referer
+        s.headers["Accept-Language"] = "de-DE,de;q=0.9"
         return s
 
     # ---------- SharePoint helpers ----------
@@ -726,6 +729,7 @@ class Command(BaseCommand):
 
     # ---------- Main ----------
     def handle(self, *args, **opts):
+        req_headers = {"Accept-Language": "de-DE,de;q=0.9"}
         baseurl = opts["baseurl"]
         pages = opts["pages"]
         filename_mode = opts.get("filename_mode", "auto")
@@ -1207,7 +1211,7 @@ class Command(BaseCommand):
 
                     self._log("DBG", "Chosen (possibly hi-res) image:", img_url)
                     try:
-                        r = requests.get(img_url, timeout=20)
+                        r = requests.get(img_url, timeout=20, headers=req_headers)
                         self._log(
                             "DBG",
                             "GET",
