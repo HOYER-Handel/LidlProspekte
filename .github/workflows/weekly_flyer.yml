@@ -2,53 +2,27 @@ name: Weekly flyer → SharePoint
 
 on:
   schedule:
-    - cron: "7 5 * * 1" # Every Monday at 05:07 UTC
-  workflow_dispatch: {}
-
-# Avoid "higher priority waiting request" cancellations and branch clashes
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+    # Every Monday at 05:07 UTC
+    - cron: "7 5 * * 1"
+  workflow_dispatch: {} # allow manual run
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
     env:
       DJANGO_SETTINGS_MODULE: prospektprojekt.settings
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
       DEBUG: "False"
 
-      # Azure / SharePoint
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       SHAREPOINT_SITE: ${{ secrets.SHAREPOINT_SITE }}
       SHAREPOINT_FOLDER: ${{ secrets.SHAREPOINT_FOLDER }}
 
-      # Scraper
+      CHROMEDRIVER: /usr/local/bin/chromedriver
       RK_PICK: current
-      PYTHONUNBUFFERED: "1"
-      TZ: Europe/Berlin
-
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        flyer:
-          - {
-              url: "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt",
-              pages: 80,
-            }
-          - {
-              url: "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt",
-              pages: 80,
-            }
-          - {
-              url: "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt",
-              pages: 80,
-            }
+      PYTHONUNBUFFERED: "1" # ok to keep; forces unbuffered Python output
 
     steps:
       - name: Checkout
@@ -58,9 +32,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
@@ -69,77 +42,20 @@ jobs:
             pip install django requests pillow selenium python-dotenv msal
           fi
 
-      - name: Setup Google Chrome (stable)
+      - name: Setup Google Chrome
         uses: browser-actions/setup-chrome@v1
+
+      - name: Setup Chromedriver
+        uses: nanasess/setup-chromedriver@v2
 
       - name: Preflight
         run: |
           python --version
           google-chrome --version || true
+          chromedriver --version || true
 
-      # Zero-code-change fix:
-      #  - Resolve overview → viewer (/prospekt-<id>-0)
-      #  - If the viewer is in an iframe, open its src directly (top-level)
-      #  - Then call your Django command
-      - name: Resolve viewer URL and run (with retries)
-        shell: bash
+      - name: Run Django command(s)
         run: |
-          set -euo pipefail
-          URL='${{ matrix.flyer.url }}'
-          PAGES='${{ matrix.flyer.pages }}'
-
-          # 1) overview → viewer
-          if [[ "$URL" != *"/prospekt-"* ]]; then
-            echo "Resolving overview → viewer for: $URL"
-            VIEWER=$(curl -fsSL "$URL" \
-              | grep -oE 'https://rabatt-kompass\.de/[^"'"'"'\s<>]*/prospekt-[0-9]+-0' \
-              | head -n 1 || true)
-            [[ -n "$VIEWER" ]] || VIEWER="$URL"
-          else
-            VIEWER="$URL"
-          fi
-
-          # 2) Ensure page_1
-          case "$VIEWER" in
-            *"#page_"*) BASE="$VIEWER" ;;
-            *)          BASE="${VIEWER}#page_1" ;;
-          esac
-          echo "Base URL: $BASE"
-
-          # 3) If an iframe is present, promote its src to top-level
-          IFSRC=$(curl -fsSL "$BASE" \
-            | grep -oE '<iframe[^>]+src="[^"]+"' \
-            | sed -E 's/.*src="([^"]+)".*/\1/' \
-            | head -n 1 || true)
-          if [[ -n "$IFSRC" ]]; then
-            if [[ "$IFSRC" == http* ]]; then
-              FINAL="$IFSRC"
-            elif [[ "$IFSRC" == /* ]]; then
-              FINAL="https://rabatt-kompass.de$IFSRC"
-            else
-              FINAL="$BASE"
-            fi
-            [[ "$FINAL" == *"#page_"* ]] || FINAL="${FINAL}#page_1"
-            echo "Promoted iframe to top-level: $FINAL"
-          else
-            FINAL="$BASE"
-          fi
-
-          # 4) Run with retries
-          for i in 1 2 3; do
-            echo "Attempt $i: $FINAL pages=$PAGES"
-            if python manage.py download_lidl_prospekt "$FINAL" "$PAGES"; then
-              echo "Success on attempt $i"; exit 0
-            fi
-            echo "Attempt $i failed"; sleep 10
-          done
-          exit 1
-
-      - name: Upload debug artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-logs-${{ matrix.flyer.pages }}
-          path: |
-            *.log
-            debug_*.png
+          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" 68
+          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt" 47
+          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt" 44
