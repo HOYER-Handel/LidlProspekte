@@ -1027,10 +1027,18 @@ class Command(BaseCommand):
                     # Try to detect the real total pages from page 1
                     try:
                         detected = self._detect_total_pages(driver)
-                        if detected and detected > 0:
+
+                        MIN_TRUSTED_TOTAL = 46
+                        if detected and detected > MIN_TRUSTED_TOTAL:
                             found_total_pages = detected
                             self._log(
-                                "INFO", f"Detected total pages: {found_total_pages}"
+                                "INFO",
+                                f"Detected total pages (trusted): {found_total_pages}",
+                            )
+                        else:
+                            self._log(
+                                "INFO",
+                                f"Ignoring small total =: {detected};continuing to scan pages.",
                             )
                     except Exception:
                         pass
