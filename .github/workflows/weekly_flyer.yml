@@ -33,7 +33,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      max-parallel: 1 # run one flyer at a time
+      max-parallel: 1
       matrix:
         flyer:
           - {
@@ -80,55 +80,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           URL='${{ matrix.flyer.url }}'
           PAGES='${{ matrix.flyer.pages }}'
 
-          # 1) If it's an overview page, pick the first viewer link (/prospekt-<id>-0)
+          # 1) overview → viewer (/prospekt-<id>-0), fallback to original
           if [[ "$URL" != *"/prospekt-"* ]]; then
             echo "Resolving overview → viewer for: $URL"
             VIEWER=$(curl -fsSL "$URL" | grep -oE 'https://rabatt-kompass\.de/[^"'"'"']*/prospekt-[0-9]+-0' | head -n 1 || true)
-            if [[ -z "$VIEWER" ]]; then
-              echo "Could not find a viewer link; using original URL."
-              VIEWER="$URL"
-            fi
+            [[ -n "$VIEWER" ]] || VIEWER="$URL"
           else
             VIEWER="$URL"
           fi
 
-          # Always start at page 1
+          # 2) Start at page 1
           case "$VIEWER" in
             *"#page_"*) BASE="$VIEWER" ;;
             *)          BASE="${VIEWER}#page_1" ;;
           esac
           echo "Base URL: $BASE"
 
-          # 2) If the page embeds a cross-origin iframe, open that iframe src directly (top-level)
-          if [[ "$BASE" == *"rabatt-kompass.de"* ]]; then
-            IFSRC=$(curl -fsSL "$BASE" | grep -oE '<iframe[^>]+src="[^"]+"' | sed -E 's/.*src="([^"]+)".*/\1/' | head -n 1 || true)
-            if [[ -n "$IFSRC" ]]; then
-              if [[ "$IFSRC" == http* ]]; then
-                FINAL="$IFSRC"
-              elif [[ "$IFSRC" == /* ]]; then
-                FINAL="https://rabatt-kompass.de$IFSRC"
-              else
-                FINAL="$BASE"
-              fi
-              [[ "$FINAL" == *"#page_"* ]] || FINAL="${FINAL}#page_1"
-              echo "Promoted iframe to top-level: $FINAL"
+          # 3) If an iframe is present, promote its src to top-level
+          IFSRC=$(curl -fsSL "$BASE" | grep -oE '<iframe[^>]+src="[^"]+"' | sed -E 's/.*src="([^"]+)".*/\1/' | head -n 1 || true)
+          if [[ -n "$IFSRC" ]]; then
+            if [[ "$IFSRC" == http* ]]; then
+              FINAL="$IFSRC"
+            elif [[ "$IFSRC" == /* ]]; then
+              FINAL="https://rabatt-kompass.de$IFSRC"
             else
               FINAL="$BASE"
             fi
+            [[ "$FINAL" == *"#page_"* ]] || FINAL="${FINAL}#page_1"
+            echo "Promoted iframe to top-level: $FINAL"
           else
             FINAL="$BASE"
           fi
 
-          # 3) Run with retries
+          # 4) Run with retries
           for i in 1 2 3; do
             echo "Attempt $i: $FINAL pages=$PAGES"
             if python manage.py download_lidl_prospekt "$FINAL" "$PAGES"; then
-              echo "Success on attempt $i"
-              exit 0
+              echo "Success on attempt $i"; exit 0
             fi
             echo "Attempt $i failed"; sleep 10
           done
