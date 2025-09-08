@@ -620,7 +620,7 @@ class Command(BaseCommand):
                 )
                 if ok:
                     self._log("DBG", f"Entered viewer iframe #{idx}")
-                    return True  # <— stay in the iframe
+                    return True  # stay in iframe
             except Exception:
                 pass
             driver.switch_to.default_content()  # only go back if NOT a match
@@ -638,7 +638,6 @@ class Command(BaseCommand):
             pass
         # not found, try iframe
         self._enter_rk_viewer_frame(driver)
-        # if no iframe found, we remain at default_content (picker will still try)
 
     def _goto_rk_page_in_context(self, driver, n: int) -> None:
         """Navigate to page n within the current browsing context (top or frame)."""
@@ -744,6 +743,17 @@ class Command(BaseCommand):
             "filename_mode=",
             filename_mode,
         )
+
+        # CI/Actions toggle: force simple top-level page reload loop on rabatt-kompass
+        ci_mode = os.getenv("CI", "").lower() in ("1", "true", "yes")
+        force_toplevel = ci_mode or (
+            os.getenv("RK_FORCE_TOPLEVEL", "").lower() in ("1", "true", "yes")
+        )
+        if force_toplevel:
+            self._log(
+                "INFO", "[CI] Forcing top-level #page_n reloads on rabatt-kompass."
+            )
+
         original_input = baseurl
         u_low_in = original_input.lower()
         retailer_hint = (
@@ -959,125 +969,259 @@ class Command(BaseCommand):
         try:
             # ---- SITE SWITCH: RK vs Lidl ----
             if "rabatt-kompass.de" in baseurl:
-                # Open viewer ONCE
-                driver.get(
-                    baseurl if "/prospekt-" in baseurl else self.page_url(baseurl, 1)
-                )
-                self._wait_cloudflare(driver)
-                self.accept_cookies_if_present(driver)
-                self._wait_first_page_ready(driver)
 
-                # enter viewer context if present
-                self._switch_to_viewer_context(driver)
+                if force_toplevel:
+                    # --- CI-safe path: reload top-level with #page_i, no iframe/keyboard ---
+                    start_url = (
+                        baseurl
+                        if "/prospekt-" in baseurl
+                        else self.page_url(baseurl, 1)
+                    )
+                    driver.get(start_url)
+                    self._wait_cloudflare(driver)
+                    self.accept_cookies_if_present(driver)
+                    self._wait_first_page_ready(driver)
 
-                # filename slug
-                current = driver.current_url or baseurl
-                candidate_viewer = resolved_slug or self.viewer_slug(current)
-                overview_slug = self.url_slug(original_input)
-                slug_for_filename = (
-                    candidate_viewer
-                    if filename_mode in ("auto", "viewer") and candidate_viewer
-                    else overview_slug
-                )
-                self._log(
-                    "INFO",
-                    "Using slug for filename (mode:",
-                    filename_mode,
-                    "):",
-                    slug_for_filename,
-                )
-
-                session = self._make_session_from_browser(
-                    driver, referer=driver.current_url or baseurl
-                )
-                prev_src = None
-
-                for i in range(1, pages + 1):
-                    self._log("INFO", f"Paging to RK page {i}")
-                    self._switch_to_viewer_context(driver)
-                    self._goto_rk_page_in_context(driver, i)
-
-                    # Wait for actual change of main image
-                    new_src = self._wait_main_img_src_changed(
-                        driver, prev_src, timeout=8.0
+                    # filename slug
+                    current = driver.current_url or baseurl
+                    candidate_viewer = resolved_slug or self.viewer_slug(current)
+                    overview_slug = self.url_slug(original_input)
+                    slug_for_filename = (
+                        candidate_viewer
+                        if filename_mode in ("auto", "viewer") and candidate_viewer
+                        else overview_slug
+                    )
+                    self._log(
+                        "INFO",
+                        "Using slug for filename (mode:",
+                        filename_mode,
+                        "):",
+                        slug_for_filename,
                     )
 
-                    if i > 1 and (not new_src or new_src == prev_src):
-                        found_total_pages = i - 1
-                        self._log(
-                            "INFO",
-                            f"Reached end at page {found_total_pages}. Stopping.",
-                        )
-                        break
+                    last_fp = None
+                    for i in range(1, pages + 1):
+                        url_i = self.page_url(start_url, i)
+                        self._log("INFO", f"[CI] Load RK page {i}: {url_i}")
+                        driver.get(url_i)
+                        self._wait_cloudflare(driver)
+                        self._wait_first_page_ready(driver)
 
-                    if not new_src:
-                        self._log(
-                            "INFO",
-                            f"No main image on page {i}; trying visual fallback…",
-                        )
-                        png_bytes = self._capture_best_visual(driver)
-                        if not png_bytes:
+                        img_url = self.pick_image_url(driver)
+                        if not img_url:
                             self._log(
-                                "INFO", f"No visual content on page {i}. Stopping."
+                                "INFO", "[CI] No direct image URL; screenshot fallback…"
                             )
-                            break
-                        try:
-                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
-                            fp = self._img_dhash(img)
-                            if (
-                                i > 1
-                                and last_fp is not None
-                                and self._ham(fp, last_fp) <= 2
-                            ):
-                                found_total_pages = i - 1
-                                self._log(
-                                    "INFO",
-                                    f"Visually same as page {found_total_pages}. Stopping.",
-                                )
+                            png = self._capture_best_visual(driver)
+                            if not png:
                                 break
-                            last_fp = fp
-                            images.append(img)
-                            prev_src = f"fp:{fp}"
-                            self._log(
-                                "INFO",
-                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                            img = Image.open(BytesIO(png)).convert("RGB")
+                        else:
+                            # try hi-res variant; fall back to screenshot if GET fails
+                            hi_url = (
+                                re.sub(
+                                    r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
+                                    r"-2000-\2.\3",
+                                    img_url,
+                                    flags=re.I,
+                                )
+                                or img_url
                             )
-                            continue
-                        except Exception:
-                            self._log("INFO", "Could not decode fallback visual.")
-                            break
-
-                    prev_src = new_src
-
-                    # Safer hi-res: replace trailing -{size}-{token}.ext only (won't hit the year)
-                    hi_url = (
-                        re.sub(
-                            r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
-                            r"-2000-\2.\3",
-                            new_src,
-                            flags=re.I,
-                        )
-                        or new_src
-                    )
-
-                    self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
-                    try:
-                        r = session.get(hi_url, timeout=20)
-                        self._log(
-                            "DBG",
-                            "GET",
-                            hi_url,
-                            "->",
-                            r.status_code,
-                            "lenHdr=",
-                            len(r.content) if r.ok else 0,
-                        )
-                        if r.status_code == 200 and r.content:
                             try:
-                                img = Image.open(BytesIO(r.content)).convert("RGB")
+                                r = requests.get(
+                                    hi_url,
+                                    timeout=20,
+                                    headers={
+                                        "Referer": url_i,
+                                        "Accept-Language": "de-DE,de;q=0.9",
+                                    },
+                                )
+                                img = (
+                                    Image.open(BytesIO(r.content)).convert("RGB")
+                                    if (r.status_code == 200 and r.content)
+                                    else None
+                                )
                             except Exception:
                                 img = None
-                            if img is not None:
+                            if img is None:
+                                self._log(
+                                    "INFO", "[CI] GET failed; screenshot fallback…"
+                                )
+                                png = self._capture_best_visual(driver)
+                                if not png:
+                                    break
+                                img = Image.open(BytesIO(png)).convert("RGB")
+
+                        fp = self._img_dhash(img)
+                        if (
+                            i > 1
+                            and last_fp is not None
+                            and self._ham(fp, last_fp) <= 2
+                        ):
+                            found_total_pages = i - 1
+                            self._log(
+                                "INFO",
+                                f"[CI] Repeated visual at {i}; stop at {found_total_pages}.",
+                            )
+                            break
+                        last_fp = fp
+                        images.append(img)
+                        self._log(
+                            "INFO", f"[CI] Page {i}: added. Total now {len(images)}"
+                        )
+
+                else:
+                    # --- Original iframe-based viewer logic ---
+                    driver.get(
+                        baseurl
+                        if "/prospekt-" in baseurl
+                        else self.page_url(baseurl, 1)
+                    )
+                    self._wait_cloudflare(driver)
+                    self.accept_cookies_if_present(driver)
+                    self._wait_first_page_ready(driver)
+
+                    # enter viewer context if present
+                    self._switch_to_viewer_context(driver)
+
+                    # filename slug
+                    current = driver.current_url or baseurl
+                    candidate_viewer = resolved_slug or self.viewer_slug(current)
+                    overview_slug = self.url_slug(original_input)
+                    slug_for_filename = (
+                        candidate_viewer
+                        if filename_mode in ("auto", "viewer") and candidate_viewer
+                        else overview_slug
+                    )
+                    self._log(
+                        "INFO",
+                        "Using slug for filename (mode:",
+                        filename_mode,
+                        "):",
+                        slug_for_filename,
+                    )
+
+                    session = self._make_session_from_browser(
+                        driver, referer=driver.current_url or baseurl
+                    )
+                    prev_src = None
+
+                    for i in range(1, pages + 1):
+                        self._log("INFO", f"Paging to RK page {i}")
+                        self._switch_to_viewer_context(driver)
+                        self._goto_rk_page_in_context(driver, i)
+
+                        # Wait for actual change of main image
+                        new_src = self._wait_main_img_src_changed(
+                            driver, prev_src, timeout=8.0
+                        )
+
+                        if i > 1 and (not new_src or new_src == prev_src):
+                            found_total_pages = i - 1
+                            self._log(
+                                "INFO",
+                                f"Reached end at page {found_total_pages}. Stopping.",
+                            )
+                            break
+
+                        if not new_src:
+                            self._log(
+                                "INFO",
+                                f"No main image on page {i}; trying visual fallback…",
+                            )
+                            png_bytes = self._capture_best_visual(driver)
+                            if not png_bytes:
+                                self._log(
+                                    "INFO", f"No visual content on page {i}. Stopping."
+                                )
+                                break
+                            try:
+                                img = Image.open(BytesIO(png_bytes)).convert("RGB")
+                                fp = self._img_dhash(img)
+                                if (
+                                    i > 1
+                                    and last_fp is not None
+                                    and self._ham(fp, last_fp) <= 2
+                                ):
+                                    found_total_pages = i - 1
+                                    self._log(
+                                        "INFO",
+                                        f"Visually same as page {found_total_pages}. Stopping.",
+                                    )
+                                    break
+                                last_fp = fp
+                                images.append(img)
+                                prev_src = f"fp:{fp}"
+                                self._log(
+                                    "INFO",
+                                    f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                                )
+                                continue
+                            except Exception:
+                                self._log("INFO", "Could not decode fallback visual.")
+                                break
+
+                        prev_src = new_src
+
+                        # Safer hi-res
+                        hi_url = (
+                            re.sub(
+                                r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
+                                r"-2000-\2.\3",
+                                new_src,
+                                flags=re.I,
+                            )
+                            or new_src
+                        )
+
+                        self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
+                        try:
+                            r = session.get(hi_url, timeout=20)
+                            self._log(
+                                "DBG",
+                                "GET",
+                                hi_url,
+                                "->",
+                                r.status_code,
+                                "lenHdr=",
+                                len(r.content) if r.ok else 0,
+                            )
+                            if r.status_code == 200 and r.content:
+                                try:
+                                    img = Image.open(BytesIO(r.content)).convert("RGB")
+                                except Exception:
+                                    img = None
+                                if img is not None:
+                                    fp = self._img_dhash(img)
+                                    if (
+                                        i > 1
+                                        and last_fp is not None
+                                        and self._ham(fp, last_fp) <= 2
+                                    ):
+                                        found_total_pages = i - 1
+                                        self._log(
+                                            "INFO",
+                                            f"Visually same as page {found_total_pages}. Stopping.",
+                                        )
+                                        break
+                                    last_fp = fp
+                                    images.append(img)
+                                    self._log(
+                                        "INFO",
+                                        f"Page {i}: added image. Total now {len(images)}",
+                                    )
+                                    continue
+                        except Exception as e:
+                            self._log("DBG", "Direct GET failed:", e)
+
+                        # Fallback screenshot in viewer
+                        self._log(
+                            "INFO", "Direct download failed; trying visual fallback…"
+                        )
+                        png_bytes = self._capture_best_visual(driver)
+                        if png_bytes:
+                            try:
+                                img = Image.open(BytesIO(png_bytes)).convert("RGB")
                                 fp = self._img_dhash(img)
                                 if (
                                     i > 1
@@ -1094,40 +1238,12 @@ class Command(BaseCommand):
                                 images.append(img)
                                 self._log(
                                     "INFO",
-                                    f"Page {i}: added image. Total now {len(images)}",
+                                    f"Page {i}: added fallback screenshot. Total now {len(images)}",
                                 )
                                 continue
-                    except Exception as e:
-                        self._log("DBG", "Direct GET failed:", e)
-
-                    # Fallback screenshot in viewer
-                    self._log("INFO", "Direct download failed; trying visual fallback…")
-                    png_bytes = self._capture_best_visual(driver)
-                    if png_bytes:
-                        try:
-                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
-                            fp = self._img_dhash(img)
-                            if (
-                                i > 1
-                                and last_fp is not None
-                                and self._ham(fp, last_fp) <= 2
-                            ):
-                                found_total_pages = i - 1
-                                self._log(
-                                    "INFO",
-                                    f"Visually same as page {found_total_pages}. Stopping.",
-                                )
+                            except Exception:
+                                self._log("INFO", "Could not decode fallback visual.")
                                 break
-                            last_fp = fp
-                            images.append(img)
-                            self._log(
-                                "INFO",
-                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
-                            )
-                            continue
-                        except Exception:
-                            self._log("INFO", "Could not decode fallback visual.")
-                            break
 
             else:
                 # LIDL.DE PATH: use /page/{n} in the top page as before
@@ -1510,7 +1626,6 @@ class Command(BaseCommand):
             upload_path = "/".join([nested_subpath, filename])
             self._log("INFO", "Uploading to path:", upload_path)
             upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
-            # handzettel.file is in Django storage; we saved to DB; re-read from storage:
             file_bytes = handzettel.datei.read()
             resp = requests.put(upload_url, headers=headers, data=file_bytes)
             self._log("INFO", "PUT upload status:", resp.status_code)

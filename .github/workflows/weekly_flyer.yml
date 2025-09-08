@@ -31,6 +31,9 @@ jobs:
       # For log timestamps (cron remains UTC regardless)
       TZ: Europe/Berlin
 
+      RK_FORCE_TOPLEVEL: "1"
+      CI: "true"
+
     strategy:
       fail-fast: false
       matrix:
