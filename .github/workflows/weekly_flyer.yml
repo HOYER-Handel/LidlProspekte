@@ -29,7 +29,7 @@ jobs:
       # Scraper
       CHROMEDRIVER: /usr/local/bin/chromedriver
       RK_PICK: current
-      RK_FORCE_TOPLEVEL: "1" # keep iframe navigation (same as local)
+      RK_FORCE_TOPLEVEL: "0" # keep iframe navigation (same as local)
       PYTHONUNBUFFERED: "1"
       TZ: Europe/Berlin
 
