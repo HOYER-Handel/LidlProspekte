@@ -990,6 +990,15 @@ class Command(BaseCommand):
                 self._log("INFO", f"Loading page {i}:", url)
                 driver.get(url)
                 self._wait_cloudflare(driver)
+                try:
+                    driver.execute_script(
+                        "window.scrollTo(0, document.body.scrollHeight);"
+                    )
+                    time.sleep(0.3)
+                    driver.execute_script("window.scrollTo(0, 0);")
+                except Exception:
+                    pass
+
                 self._log("DBG", "current_url after GET:", driver.current_url or url)
 
                 # If viewer clamped (e.g., requested 46, showing 45)
@@ -1025,23 +1034,7 @@ class Command(BaseCommand):
                     )
 
                     # Try to detect the real total pages from page 1
-                    try:
-                        detected = self._detect_total_pages(driver)
-
-                        MIN_TRUSTED_TOTAL = 46
-                        if detected and detected > MIN_TRUSTED_TOTAL:
-                            found_total_pages = detected
-                            self._log(
-                                "INFO",
-                                f"Detected total pages (trusted): {found_total_pages}",
-                            )
-                        else:
-                            self._log(
-                                "INFO",
-                                f"Ignoring small total =: {detected};continuing to scan pages.",
-                            )
-                    except Exception:
-                        pass
+                    self._log("DBG", "Skipping total detection (auto-stop mode).")
 
                 try:
                     WebDriverWait(driver, 8).until(
