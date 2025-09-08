@@ -974,6 +974,7 @@ class Command(BaseCommand):
         slug_for_filename: str | None = None
         found_total_pages: int | None = None
         last_fp: int | None = None  # perceptual fingerprint of previous page (dHash)
+        prev_main_src: str | None = None
 
         # loop through pages
         try:
@@ -999,8 +1000,15 @@ class Command(BaseCommand):
                 except Exception:
                     pass
 
-                self._log("DBG", "current_url after GET:", driver.current_url or url)
-
+                try:
+                    driver.execute_script(
+                        f"if (location.hash !== '#page_{i}') location.hash = '#page_{i}';"
+                    )
+                    driver.execute_script(
+                        "window.dispatchEvent(new HashChangeEvent('hashchange'));"
+                    )
+                except Exception:
+                    pass
                 # If viewer clamped (e.g., requested 46, showing 45)
                 try:
                     actual = self._current_page_from_url(driver.current_url or url)
@@ -1042,49 +1050,18 @@ class Command(BaseCommand):
                     )
                 except Exception:
                     pass
-                time.sleep(1.0)
 
-                img_url = self.pick_image_url(driver)
+                img_url = None
+                for _ in range(20):
+                    cand = self.pick_image_url(driver)
+                    if cand and cand != prev_main_src:
+                        img_url = cand
+                        break
+                    time.sleep(0.25)
 
                 # If no direct image URL -> try visual fallback before deciding to stop
                 if not img_url:
-                    self._log("INFO", "No direct image URL; trying visual fallback…")
-                    png_bytes = self._capture_best_visual(driver)
-                    if png_bytes:
-                        try:
-                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
-                            fp = self._img_dhash(img)
-                            if (
-                                i > 1
-                                and last_fp is not None
-                                and self._ham(fp, last_fp) <= 2
-                            ):
-                                found_total_pages = i - 1
-                                self._log(
-                                    "INFO",
-                                    f"Visually same as page {found_total_pages}. Stopping.",
-                                )
-                                break
-                            last_fp = fp
-                            images.append(img)
-                            self._log(
-                                "INFO",
-                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
-                            )
-                            continue
-                        except Exception:
-                            self._log("INFO", "Could not decode fallback visual.")
-                            self._log(
-                                "INFO",
-                                f"No usable visual content on page {i}. Stopping.",
-                            )
-                            break
-                    else:
-                        self._log(
-                            "INFO",
-                            f"No visual content captured on page {i}. Stopping here.",
-                        )
-                        break
+                    img_url = self.pick_image_url(driver)
 
                 # We have an image URL → try high-res and GET
                 hi_url = (
@@ -1133,6 +1110,7 @@ class Command(BaseCommand):
                             )
 
                             images.append(img)
+                            prev_main_src = img_url
                             self._log(
                                 "INFO",
                                 f"Page {i}: added image. Total now {len(images)}",
@@ -1161,6 +1139,7 @@ class Command(BaseCommand):
                             break
                         last_fp = fp
                         images.append(img)
+                        prev_main_src = f"fp:{fp}"
                         self._log(
                             "INFO",
                             f"Page {i}: added fallback screenshot. Total now {len(images)}",
