@@ -2,27 +2,52 @@ name: Weekly flyer → SharePoint
 
 on:
   schedule:
-    # Every Monday at 05:07 UTC
-    - cron: "7 5 * * 1"
-  workflow_dispatch: {} # allow manual run
+    - cron: "7 5 * * 1" # Every Monday at 05:07 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     env:
       DJANGO_SETTINGS_MODULE: prospektprojekt.settings
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
       DEBUG: "False"
 
+      # Azure / SharePoint
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       SHAREPOINT_SITE: ${{ secrets.SHAREPOINT_SITE }}
       SHAREPOINT_FOLDER: ${{ secrets.SHAREPOINT_FOLDER }}
 
-      CHROMEDRIVER: /usr/local/bin/chromedriver
       RK_PICK: current
-      PYTHONUNBUFFERED: "1" # ok to keep; forces unbuffered Python output
+      RK_FORCE_TOPLEVEL: "1"
+      PYTHONUNBUFFERED: "1"
+      TZ: Europe/Berlin
+
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        flyer:
+          - {
+              url: "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt",
+              pages: 80,
+            }
+          - {
+              url: "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt",
+              pages: 80,
+            }
+          - {
+              url: "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt",
+              pages: 80,
+            }
 
     steps:
       - name: Checkout
@@ -32,8 +57,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
@@ -42,20 +68,33 @@ jobs:
             pip install django requests pillow selenium python-dotenv msal
           fi
 
-      - name: Setup Google Chrome
+      - name: Setup Google Chrome (stable)
         uses: browser-actions/setup-chrome@v1
-
-      - name: Setup Chromedriver
-        uses: nanasess/setup-chromedriver@v2
 
       - name: Preflight
         run: |
           python --version
           google-chrome --version || true
-          chromedriver --version || true
 
-      - name: Run Django command(s)
+      - name: Run Django command (with retries)
+        shell: bash
         run: |
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" 68
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt" 47
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt" 44
+          set -euo pipefail
+          for i in 1 2 3; do
+            echo "Attempt $i: ${{ matrix.flyer.url }} pages=${{ matrix.flyer.pages }}"
+            if python manage.py download_lidl_prospekt "${{ matrix.flyer.url }}" ${{ matrix.flyer.pages }}; then
+              echo "Success on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i failed"; sleep 10
+          done
+          exit 1
+
+      - name: Upload debug artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs-${{ matrix.flyer.pages }}
+          path: |
+            *.log
+            debug_*.png
