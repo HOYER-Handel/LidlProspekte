@@ -620,7 +620,7 @@ class Command(BaseCommand):
                 )
                 if ok:
                     self._log("DBG", f"Entered viewer iframe #{idx}")
-                    return True  # stay in iframe
+                    return True  # stay in the iframe
             except Exception:
                 pass
             driver.switch_to.default_content()  # only go back if NOT a match
@@ -638,11 +638,12 @@ class Command(BaseCommand):
             pass
         # not found, try iframe
         self._enter_rk_viewer_frame(driver)
+        # if no iframe found, we remain at default_content (picker will still try)
 
     def _goto_rk_page_in_context(self, driver, n: int) -> None:
         """Navigate to page n within the current browsing context (top or frame)."""
         # 1) Click thumbnail when available
-        thumbs = driver.find_elements(By.CSS_SELECTOR, f"a[href*='#page_{n}']")
+        thumbs = driver.find_elements(By.CSS_SELECTOR, f"a[href$='#page_{n}']")
         if thumbs:
             try:
                 driver.execute_script(
@@ -744,7 +745,6 @@ class Command(BaseCommand):
             filename_mode,
         )
 
-        # CI/Actions toggle: force simple top-level page reload loop on rabatt-kompass
         ci_mode = os.getenv("CI", "").lower() in ("1", "true", "yes")
         force_toplevel = ci_mode or (
             os.getenv("RK_FORCE_TOPLEVEL", "").lower() in ("1", "true", "yes")
@@ -1007,6 +1007,7 @@ class Command(BaseCommand):
                         self._wait_cloudflare(driver)
                         self._wait_first_page_ready(driver)
 
+                        img = None
                         img_url = self.pick_image_url(driver)
                         if not img_url:
                             self._log(
@@ -1017,7 +1018,6 @@ class Command(BaseCommand):
                                 break
                             img = Image.open(BytesIO(png)).convert("RGB")
                         else:
-                            # try hi-res variant; fall back to screenshot if GET fails
                             hi_url = (
                                 re.sub(
                                     r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
@@ -1036,13 +1036,16 @@ class Command(BaseCommand):
                                         "Accept-Language": "de-DE,de;q=0.9",
                                     },
                                 )
-                                img = (
-                                    Image.open(BytesIO(r.content)).convert("RGB")
-                                    if (r.status_code == 200 and r.content)
-                                    else None
-                                )
+                                if r.status_code == 200 and r.content:
+                                    try:
+                                        img = Image.open(BytesIO(r.content)).convert(
+                                            "RGB"
+                                        )
+                                    except Exception:
+                                        img = None
                             except Exception:
                                 img = None
+
                             if img is None:
                                 self._log(
                                     "INFO", "[CI] GET failed; screenshot fallback…"
@@ -1052,6 +1055,7 @@ class Command(BaseCommand):
                                     break
                                 img = Image.open(BytesIO(png)).convert("RGB")
 
+                        # record page & stop if repeated
                         fp = self._img_dhash(img)
                         if (
                             i > 1
@@ -1072,6 +1076,7 @@ class Command(BaseCommand):
 
                 else:
                     # --- Original iframe-based viewer logic ---
+                    # Open viewer ONCE
                     driver.get(
                         baseurl
                         if "/prospekt-" in baseurl
@@ -1609,6 +1614,7 @@ class Command(BaseCommand):
                         f"Folder check failed for '{parent_path}': {r.status_code} {r.text}"
                     )
 
+        today = datetime.date.today()
         subpath = "/".join(sharepoint_folder.split("/")[1:])
         year_folder = f"{today.year}"
         brand_folder = self.brand_folder_name(market)
@@ -1626,6 +1632,7 @@ class Command(BaseCommand):
             upload_path = "/".join([nested_subpath, filename])
             self._log("INFO", "Uploading to path:", upload_path)
             upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
+            # handzettel.file is in Django storage; we saved to DB; re-read from storage:
             file_bytes = handzettel.datei.read()
             resp = requests.put(upload_url, headers=headers, data=file_bytes)
             self._log("INFO", "PUT upload status:", resp.status_code)

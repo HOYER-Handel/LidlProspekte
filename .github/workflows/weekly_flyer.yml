@@ -2,8 +2,7 @@ name: Weekly flyer → SharePoint
 
 on:
   schedule:
-    # Every Monday at 05:07 UTC (06:07 CET / 07:07 CEST in Berlin)
-    - cron: "7 5 * * 1"
+    - cron: "7 5 * * 1" # Every Monday at 05:07 UTC
   workflow_dispatch: {}
 
 concurrency:
@@ -13,29 +12,29 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     env:
       DJANGO_SETTINGS_MODULE: prospektprojekt.settings
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
       DEBUG: "False"
 
+      # Azure / SharePoint
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       SHAREPOINT_SITE: ${{ secrets.SHAREPOINT_SITE }}
       SHAREPOINT_FOLDER: ${{ secrets.SHAREPOINT_FOLDER }}
 
-      CHROMEDRIVER: /usr/local/bin/chromedriver
+      # Scraper behavior
       RK_PICK: current
+      RK_FORCE_TOPLEVEL: "0" # keep iframe navigation (same as local)
       PYTHONUNBUFFERED: "1"
-      # For log timestamps (cron remains UTC regardless)
       TZ: Europe/Berlin
-
-      RK_FORCE_TOPLEVEL: "1"
-      CI: "true"
 
     strategy:
       fail-fast: false
+      max-parallel: 1 # run one flyer at a time
       matrix:
         flyer:
           - {
@@ -61,7 +60,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
@@ -70,18 +69,32 @@ jobs:
             pip install django requests pillow selenium python-dotenv msal
           fi
 
-      - name: Setup Google Chrome
+      - name: Setup Google Chrome (stable)
         uses: browser-actions/setup-chrome@v1
-
-      - name: Setup Chromedriver
-        uses: nanasess/setup-chromedriver@v2
 
       - name: Preflight
         run: |
           python --version
           google-chrome --version || true
-          chromedriver --version || true
 
-      - name: Run Django command
+      - name: Run Django command (with retries)
         run: |
-          python manage.py download_lidl_prospekt "${{ matrix.flyer.url }}" ${{ matrix.flyer.pages }}
+          for i in 1 2 3; do
+            echo "Attempt $i: ${{
+              matrix.flyer.url }} pages=${{ matrix.flyer.pages }}"
+            if python manage.py download_lidl_prospekt "${{ matrix.flyer.url }}" ${{ matrix.flyer.pages }}; then
+              echo "Success on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i failed"; sleep 10
+          done
+          exit 1
+
+      - name: Upload debug artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs-${{ matrix.flyer.pages }}
+          path: |
+            *.log
+            debug_*.png
