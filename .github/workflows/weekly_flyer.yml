@@ -5,9 +5,10 @@ on:
     - cron: "7 5 * * 1" # Every Monday at 05:07 UTC
   workflow_dispatch: {}
 
+# Avoid "higher priority waiting request" cancellations and branch clashes
 concurrency:
-  group: weekly-flyer
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -76,6 +77,10 @@ jobs:
           python --version
           google-chrome --version || true
 
+      # Zero-code-change fix:
+      #  - Resolve overview → viewer (/prospekt-<id>-0)
+      #  - If the viewer is in an iframe, open its src directly (top-level)
+      #  - Then call your Django command
       - name: Resolve viewer URL and run (with retries)
         shell: bash
         run: |
@@ -83,16 +88,18 @@ jobs:
           URL='${{ matrix.flyer.url }}'
           PAGES='${{ matrix.flyer.pages }}'
 
-          # 1) overview → viewer (/prospekt-<id>-0), fallback to original
+          # 1) overview → viewer
           if [[ "$URL" != *"/prospekt-"* ]]; then
             echo "Resolving overview → viewer for: $URL"
-            VIEWER=$(curl -fsSL "$URL" | grep -oE 'https://rabatt-kompass\.de/[^"'"'"']*/prospekt-[0-9]+-0' | head -n 1 || true)
+            VIEWER=$(curl -fsSL "$URL" \
+              | grep -oE 'https://rabatt-kompass\.de/[^"'"'"'\s<>]*/prospekt-[0-9]+-0' \
+              | head -n 1 || true)
             [[ -n "$VIEWER" ]] || VIEWER="$URL"
           else
             VIEWER="$URL"
           fi
 
-          # 2) Start at page 1
+          # 2) Ensure page_1
           case "$VIEWER" in
             *"#page_"*) BASE="$VIEWER" ;;
             *)          BASE="${VIEWER}#page_1" ;;
@@ -100,7 +107,10 @@ jobs:
           echo "Base URL: $BASE"
 
           # 3) If an iframe is present, promote its src to top-level
-          IFSRC=$(curl -fsSL "$BASE" | grep -oE '<iframe[^>]+src="[^"]+"' | sed -E 's/.*src="([^"]+)".*/\1/' | head -n 1 || true)
+          IFSRC=$(curl -fsSL "$BASE" \
+            | grep -oE '<iframe[^>]+src="[^"]+"' \
+            | sed -E 's/.*src="([^"]+)".*/\1/' \
+            | head -n 1 || true)
           if [[ -n "$IFSRC" ]]; then
             if [[ "$IFSRC" == http* ]]; then
               FINAL="$IFSRC"
