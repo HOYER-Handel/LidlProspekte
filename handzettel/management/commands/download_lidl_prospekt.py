@@ -746,9 +746,9 @@ class Command(BaseCommand):
         )
 
         ci_mode = os.getenv("CI", "").lower() in ("1", "true", "yes")
-        force_toplevel = ci_mode or (
-            os.getenv("RK_FORCE_TOPLEVEL", "").lower() in ("1", "true", "yes")
-        )
+        rk_force = os.getenv("RK_FORCE_TOPLEVEL", "").lower()
+        force_toplevel = (rk_force in ("1", "true", "yes")) if rk_force else ci_mode
+
         if force_toplevel:
             self._log(
                 "INFO", "[CI] Forcing top-level #page_n reloads on rabatt-kompass."

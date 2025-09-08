@@ -26,7 +26,8 @@ jobs:
       SHAREPOINT_SITE: ${{ secrets.SHAREPOINT_SITE }}
       SHAREPOINT_FOLDER: ${{ secrets.SHAREPOINT_FOLDER }}
 
-      # Scraper behavior
+      # Scraper
+      CHROMEDRIVER: /usr/local/bin/chromedriver
       RK_PICK: current
       RK_FORCE_TOPLEVEL: "0" # keep iframe navigation (same as local)
       PYTHONUNBUFFERED: "1"
