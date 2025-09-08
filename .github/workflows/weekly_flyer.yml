@@ -37,15 +37,15 @@ jobs:
         flyer:
           - {
               url: "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt",
-              pages: 60,
+              pages: 80,
             }
           - {
               url: "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt",
-              pages: 120,
+              pages: 80,
             }
           - {
               url: "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt",
-              pages: 55,
+              pages: 80,
             }
 
     steps:
