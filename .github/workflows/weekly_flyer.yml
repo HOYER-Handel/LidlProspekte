@@ -27,9 +27,7 @@ jobs:
       SHAREPOINT_FOLDER: ${{ secrets.SHAREPOINT_FOLDER }}
 
       # Scraper
-      CHROMEDRIVER: /usr/local/bin/chromedriver
       RK_PICK: current
-      RK_FORCE_TOPLEVEL: "1" # keep iframe navigation (same as local)
       PYTHONUNBUFFERED: "1"
       TZ: Europe/Berlin
 
@@ -78,12 +76,57 @@ jobs:
           python --version
           google-chrome --version || true
 
-      - name: Run Django command (with retries)
+      - name: Resolve viewer URL and run (with retries)
+        shell: bash
         run: |
+          set -euo pipefail
+
+          URL='${{ matrix.flyer.url }}'
+          PAGES='${{ matrix.flyer.pages }}'
+
+          # 1) If it's an overview page, pick the first viewer link (/prospekt-<id>-0)
+          if [[ "$URL" != *"/prospekt-"* ]]; then
+            echo "Resolving overview → viewer for: $URL"
+            VIEWER=$(curl -fsSL "$URL" | grep -oE 'https://rabatt-kompass\.de/[^"'"'"']*/prospekt-[0-9]+-0' | head -n 1 || true)
+            if [[ -z "$VIEWER" ]]; then
+              echo "Could not find a viewer link; using original URL."
+              VIEWER="$URL"
+            fi
+          else
+            VIEWER="$URL"
+          fi
+
+          # Always start at page 1
+          case "$VIEWER" in
+            *"#page_"*) BASE="$VIEWER" ;;
+            *)          BASE="${VIEWER}#page_1" ;;
+          esac
+          echo "Base URL: $BASE"
+
+          # 2) If the page embeds a cross-origin iframe, open that iframe src directly (top-level)
+          if [[ "$BASE" == *"rabatt-kompass.de"* ]]; then
+            IFSRC=$(curl -fsSL "$BASE" | grep -oE '<iframe[^>]+src="[^"]+"' | sed -E 's/.*src="([^"]+)".*/\1/' | head -n 1 || true)
+            if [[ -n "$IFSRC" ]]; then
+              if [[ "$IFSRC" == http* ]]; then
+                FINAL="$IFSRC"
+              elif [[ "$IFSRC" == /* ]]; then
+                FINAL="https://rabatt-kompass.de$IFSRC"
+              else
+                FINAL="$BASE"
+              fi
+              [[ "$FINAL" == *"#page_"* ]] || FINAL="${FINAL}#page_1"
+              echo "Promoted iframe to top-level: $FINAL"
+            else
+              FINAL="$BASE"
+            fi
+          else
+            FINAL="$BASE"
+          fi
+
+          # 3) Run with retries
           for i in 1 2 3; do
-            echo "Attempt $i: ${{
-              matrix.flyer.url }} pages=${{ matrix.flyer.pages }}"
-            if python manage.py download_lidl_prospekt "${{ matrix.flyer.url }}" ${{ matrix.flyer.pages }}; then
+            echo "Attempt $i: $FINAL pages=$PAGES"
+            if python manage.py download_lidl_prospekt "$FINAL" "$PAGES"; then
               echo "Success on attempt $i"
               exit 0
             fi

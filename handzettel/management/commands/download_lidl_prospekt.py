@@ -963,32 +963,6 @@ class Command(BaseCommand):
                 self.accept_cookies_if_present(driver)
                 self._wait_first_page_ready(driver)
 
-                # --- EASIEST CI FIX: open the viewer iframe directly in the main tab ---
-                if os.getenv("RK_FORCE_TOPLEVEL", "0") not in (
-                    "0",
-                    "",
-                    "false",
-                    "False",
-                ):
-                    try:
-                        iframe = driver.find_element(By.CSS_SELECTOR, "iframe[src]")
-                        src = (iframe.get_attribute("src") or "").strip()
-                        if src:
-                            if "#page_1" not in src:
-                                src = src + ("#page_1" if "#" not in src else "")
-                            self._log(
-                                "INFO",
-                                "CI mode: opening viewer iframe src directly:",
-                                src,
-                            )
-                            driver.switch_to.default_content()
-                            driver.get(src)
-                            self._wait_cloudflare(driver)
-                            self._wait_first_page_ready(driver)
-                    except Exception as e:
-                        self._log("DBG", "No promotable iframe (ok locally):", e)
-                # -----------------------------------------------------------------------
-
                 # enter viewer context if present
                 self._switch_to_viewer_context(driver)
 
