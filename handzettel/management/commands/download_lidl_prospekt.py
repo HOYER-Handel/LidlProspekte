@@ -76,13 +76,10 @@ class Command(BaseCommand):
         print(f"[{level} {time.strftime('%H:%M:%S')}]", " ".join(str(p) for p in parts))
 
     # ---------- Chrome / Cloudflare helpers ----------
-    # Builds a set of settings for Chrome so Selenium can run without a window and look like a normal desktop browser
     def _configure_chrome_options(self) -> Options:
         opts = Options()
-        opts.add_argument("--headless=new")  # no visible window
-        opts.add_argument(
-            "--window-size=1920,1080"
-        )  # many sites load images based on size
+        opts.add_argument("--headless=new")
+        opts.add_argument("--window-size=1920,1080")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
@@ -95,7 +92,6 @@ class Command(BaseCommand):
         opts.add_argument(f"--user-agent={ua}")
         return opts
 
-    # Small trick so sites don t easily detect Selenium -->It makes Selenium look less like a bot by hiding the flag navigator.webdriver
     def _apply_basic_stealth(self, driver):
         try:
             driver.execute_cdp_cmd(
@@ -107,10 +103,6 @@ class Command(BaseCommand):
         except Exception:
             pass
 
-    # waits if cloudflare shows "just a moment" challenges
-
-    # it pauses script while Cloudflare is showing the "just a moment"bot check page, then contines once the real page is ready
-    # This function waits just long enough so the real content can load
     def _wait_cloudflare(self, driver, max_wait=25):
         start = time.time()
         while time.time() - start < max_wait:
@@ -137,7 +129,6 @@ class Command(BaseCommand):
 
     # --- Build the correct URL for each page depending on the site ---
     def page_url(self, baseurl: str, n: int) -> str:
-        # lidl paths use /page/<n>
         if "lidl.de" in baseurl:
             if re.search(r"/page/\d+", baseurl):
                 return re.sub(r"/page/\d+", f"/page/{n}", baseurl)
@@ -145,23 +136,19 @@ class Command(BaseCommand):
             path = parts[0].rstrip("/")
             query = f"?{parts[1]}" if len(parts) == 2 else ""
             return f"{path}/page/{n}{query}"
-        # rabatt Kompass uses #pages_<n>
         if re.search(r"#page_\d+", baseurl):
             return re.sub(r"#page_\d+", f"#page_{n}", baseurl)
         return f"{baseurl}#page_{n}"
 
-    # --- Slug helpers Creates a safe slug from the last path segment of a URL --> used in filenames/Runs of bad characters collapse to a single -
     def url_slug(self, url: str) -> str:
         path = urlparse(url).path.rstrip("/")
         seg = (path.split("/")[-1] or "prospekt").lower()
         return re.sub(r"[^a-z0-9_-]+", "-", seg)
 
-    # If the URL looks like /prospekt-<id>-0, returns that stable slug (e.g. prospekt-2898320-0).
     def viewer_slug(self, url: str) -> str | None:
         m = re.search(r"/prospekt-(\d+)-0", url)
         return f"prospekt-{m.group(1)}-0" if m else None
 
-    # --- Cookie banner ---Clicks common cookie “accept” buttons if they exist. Ignores errors.
     def accept_cookies_if_present(self, driver):
         for locator in [
             (By.ID, "onetrust-accept-btn-handler"),
@@ -169,20 +156,15 @@ class Command(BaseCommand):
             (By.XPATH, "//button[contains(., 'Akzeptieren')]"),
             (By.XPATH, "//button[contains(., 'Zustimmen')]"),
         ]:
-            # it loops over these options 1 by 1, wait up to 4 seconds unntil the button is clickable
             try:
                 WebDriverWait(driver, 4).until(
                     EC.element_to_be_clickable(locator)
-                    # if it becomes clickable
-                ).click()  # click it
-                time.sleep(0.3)  # wait 0.3s
+                ).click()
+                time.sleep(0.3)
                 break
             except Exception:
-                pass  # if the button isn t there,it ignore the error and tries the next option
+                pass
 
-    # Waits until images are present and then does a quick scroll down & up to trigger lazy-loading
-    # Many pages don’t load images until scroll.If it starts scraping too early, you’ll miss the images.
-    # This function makes sure the images are present (or at least likely to be), before the next steps run
     def _wait_first_page_ready(self, driver):
         if "rabatt-kompass.de" in (driver.current_url or ""):
             try:
@@ -207,11 +189,9 @@ class Command(BaseCommand):
         except Exception:
             pass
 
-    # Looks inside a text(already lowcrase) and tries to find German sytle dates,it retirns a start date and end date as dateime.date objects
     def _extract_date_range(self, blob_lower: str):
         today = datetime.date.today()
         year = today.year
-
         m = re.search(
             r"(\d{1,2})\.(\d{1,2})\.\s*[–-]\s*(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?",
             blob_lower,
@@ -225,9 +205,8 @@ class Command(BaseCommand):
                 if end < start and not y2:
                     end = datetime.date(year + 1, int(m2), int(d2))
                 return start, end
-            except Exception:  # if it can t find any dates it returns (None,None)
+            except Exception:
                 return None, None
-        # Returns (start_date, end_date)
         m = re.search(
             r"(gültig\s+bis|bis)\s+(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", blob_lower
         )
@@ -239,7 +218,6 @@ class Command(BaseCommand):
                 return None, end
             except Exception:
                 return None, None
-
         m = re.search(r"\bab\s+(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?", blob_lower)
         if m:
             d1, m1, y1 = m.groups()
@@ -249,10 +227,8 @@ class Command(BaseCommand):
                 return start, None
             except Exception:
                 return None, None
-
         return None, None
 
-    # It reads some text and adds or subtracts points when it sees ceratin words.It helps pick the best flyer
     def _retailer_phrase_bonus(
         self, blob: str, retailer_hint: str, mode: str
     ) -> tuple[int, list[str]]:
@@ -270,7 +246,7 @@ class Command(BaseCommand):
             )
         )
         is_kw = bool(re.search(r"\bkw\s*\d{1,2}\b", blob))
-        if mode == "current":  # this week
+        if mode == "current":
             if is_aktuell:
                 b += 350
                 why.append("phrase:aktuell+350")
@@ -280,7 +256,7 @@ class Command(BaseCommand):
             if is_vorschau:
                 b -= 450
                 why.append("phrase:vorschau-450")
-        elif mode == "upcoming":  # next week
+        elif mode == "upcoming":
             if is_vorschau:
                 b += 350
                 why.append("phrase:vorschau+350")
@@ -288,7 +264,7 @@ class Command(BaseCommand):
                 b -= 150
                 why.append("phrase:aktuell-150")
         else:
-            if is_aktuell:  # neutral
+            if is_aktuell:
                 b += 40
                 why.append("phrase:aktuell+40")
             if is_vorschau:
@@ -297,24 +273,18 @@ class Command(BaseCommand):
             if is_kw:
                 b += 20
                 why.append("phrase:kw+20")
-
         if retailer_hint == "lidl" and "lidl" in blob:
             b += 25
             why.append("retailer:lidl+25")
         elif retailer_hint == "aldi" and "aldi" in blob:
             b += 25
             why.append("retailer:aldi+25")
-
         return b, why
 
-    # scoring helper
     def _id_bias(self, href: str, mode: str) -> tuple[int, str]:
-        # find ID in URL like /prospekt-123456-0
         m = re.search(r"/prospekt-(\d+)-0", href)
         if not m:
-            # if no id --> return (0, "")
             return 0, ""
-        # If mode == "latest" (prefer newest uploads)
         pid = int(m.group(1))
         if mode == "latest":
             add = min(2000, (pid // 10) % 3000)
@@ -323,8 +293,6 @@ class Command(BaseCommand):
             add = (pid % 13) - 6
             return add, f"id(light):{pid}(+{add})"
 
-    # Inputs: a: the link element form Selenium,retailer_hint:which store lidl or aldi,mode:"current","upcoming"or "latest"
-    # this function adds points for good signs (right store, prospekt words, “this week”/“next week”, valid dates, newer ID) and subtracts for past dates. The highest score wins
     def _score_rk_viewer_link(
         self, a, retailer_hint: str, mode: str
     ) -> tuple[int, str, str]:
@@ -379,24 +347,16 @@ class Command(BaseCommand):
                 reasons.append(f"overview:ab_future+{b}")
 
         s += date_bonus
-
         phrase_b, why = self._retailer_phrase_bonus(blob, retailer_hint, mode)
         s += phrase_b
         reasons.extend(why)
-
         id_b, why_id = self._id_bias(href, mode)
         s += id_b
         reasons.append(why_id)
-
         return int(s), href, ", ".join(reasons)
 
-    # open 1 flyer page and decide status:current(this week),upcoming(next),or unknown
-    # exple: Text shows: “01.09.–07.09.2025” → current, +2000,Text shows: “ab 10.09.2025” → upcoming, about +500..+1200 (closer date = higher)
-    #   Text shows: “Vorschau – nächste Woche” and no dates → upcoming, +900,Text shows: “01.08.–07.08.2025” → past, −700
     def _inspect_viewer_details(self, driver, href: str):
-        # open the page href-->make sure it shows page1
         status, bonus, reason = "unknown", 0, []
-        # wait a moment(firstimage)
         try:
             driver.get(href if "#page_1" in href else href + "#page_1")
             self._wait_cloudflare(driver)
@@ -408,9 +368,7 @@ class Command(BaseCommand):
                 )
             except Exception:
                 pass
-            # read the page html +<h1>/<h2>text, all in lowcrase
             html = (driver.page_source or "").lower()
-            # include visible text around leaflet title if present
             try:
                 head = driver.find_element(By.CSS_SELECTOR, "h1, h2").text.lower()
                 html = head + "\n" + html
@@ -476,12 +434,9 @@ class Command(BaseCommand):
                 "reason": f"viewer:error {e}",
             }
 
-    # --- Find one good image URL on the current page,if it findes one it returns the URL.If not it returns None
-    # The goal of pick_image_url is to find the single best URL of the flyer page image on the current webpage so the script can download it and later build the PDF
+    # --- Find one good image URL on the current page
     def pick_image_url(self, driver) -> str | None:
-        # detect site--> checks if we re on RB.de
         on_rk = "rabatt-kompass.de" in (driver.current_url or "")
-        # collect all possible images via a small javaScript.It returns a list of object like:{ src: "...", w: <naturalWidth>, h: <naturalHeight>, vis: <visible_pixels> }
         imgs = (
             driver.execute_script(
                 """
@@ -524,7 +479,6 @@ class Command(BaseCommand):
             )
             or []
         )
-        # Skip known tracking / analytics / cookie images — they’re not our flyer pages
 
         EXCLUDE = (
             "bat.bing.com",
@@ -541,54 +495,42 @@ class Command(BaseCommand):
 
         cands = []
         for it in imgs:
-            # Normalize values from the JS result
             u = (it.get("src") or "").strip()
             w = int(it.get("w") or 0)
             h = int(it.get("h") or 0)
             vis = int(it.get("vis") or 0)
-            if not u.startswith("http"):  # Filter 1: must be an absolute http(s) URL
+            if not u.startswith("http"):
                 continue
-            if any(b in u for b in EXCLUDE):  # Filter 2: drop trackers/analytics
+            if any(b in u for b in EXCLUDE):
                 continue
-            if u.lower().endswith(
-                ".svg"
-            ):  # Filter 3: skip SVGs (usually icons/logos, not flyer pages)
+            if u.lower().endswith(".svg"):
                 continue
 
             if on_rk:
-                # On rabatt-kompass we *require* the known flyer path and a minimum size
                 if "/public/gimg/" not in u or w < 600 or h < 800:
                     continue
-                # Score: visibility and size matter, plus a big base bonus for /public/gimg/
                 score = vis * 5 + w * h // 20 + 800_000
             else:
-                # On other sites (e.g., lidl.de), be more heuristic
                 score = vis * 4 + w * h // 25
                 if re.search(r"\.(jpe?g|png|webp)(\?|$)", u, re.I):
                     score += 250_000
-                    # Bonus if the URL name hints it's a flyer page
                 if any(k in u.lower() for k in ("flyer", "page", "seiten", "prospekt")):
                     score += 80_000
-                    # Penalty if it looks like a thumbnail or icon
                 if any(k in u.lower() for k in ("thumb", "icon", "small")):
                     score -= 200_000
-            # Keep (score, url, dimensions, visibility) for comparison
             cands.append((score, u, w, h, vis))
-        # Pick the single best candidate
         if cands:
             cands.sort(key=lambda t: t[0], reverse=True)
             self._log("DBG", f"Collected candidate visuals: {len(cands)}")
             self._log("DBG", "TOP CANDIDATES:")
             for score, src, w, h, vis in cands[:8]:
                 extra = "rk_gimg+8e5" if on_rk and "/public/gimg/" in src else ""
-                # avoid float formatting error on some Python versions
                 print(f"    {score:8.0f}  [img]  {src}  :: {w}x{h}, vis={vis}, {extra}")
             chosen = cands[0][1]
             self._log("DBG", "Chosen image URL:", chosen)
             return chosen
         return None
 
-    # This function grabs the best possible screenshot from the page (as PNG bytes) so we can still build the PDF.
     def _capture_best_visual(self, driver) -> bytes | None:
         try:
             best, area = None, 0
@@ -641,7 +583,6 @@ class Command(BaseCommand):
         except Exception:
             return None
 
-    # --- Page numbering helpers & total detection ---
     def _current_page_from_url(self, url: str) -> int | None:
         m = re.search(r"(?:#page_|/page/)(\d+)", url or "")
         return int(m.group(1)) if m else None
@@ -651,16 +592,13 @@ class Command(BaseCommand):
             html = driver.page_source or ""
         except Exception:
             html = ""
-
         m = re.search(r"(?:Seite|Page)\s*\d+\s*/\s*(\d{1,3})", html, re.I)
         if m:
             return int(m.group(1))
-
         for key in ("pageCount", "totalPages", "pagesTotal", "numPages"):
             m = re.search(rf'"{key}"\s*:\s*(\d{{1,3}})', html)
             if m:
                 return int(m.group(1))
-
         try:
             thumbs = driver.find_elements(By.CSS_SELECTOR, "a[href*='#page_']")
             nums = []
@@ -673,13 +611,9 @@ class Command(BaseCommand):
                 return max(nums)
         except Exception:
             pass
-
         return None
 
-    # --- Perceptual hash (dHash) for visual-duplicate stop ---
     def _img_dhash(self, img: Image.Image) -> int:
-        """8x8 perceptual dHash (64-bit)."""
-        # Pillow keeps Image.LANCZOS for backward compat; if using PIL>=10, Resampling.LANCZOS also works.
         small = img.convert("L").resize((9, 8), Image.LANCZOS)
         px = list(small.getdata())
         bits = 0
@@ -690,7 +624,6 @@ class Command(BaseCommand):
         return bits
 
     def _ham(self, a: int, b: int) -> int:
-        """Hamming distance between two 64-bit integers."""
         x = a ^ b
         cnt = 0
         while x:
@@ -698,36 +631,39 @@ class Command(BaseCommand):
             cnt += 1
         return cnt
 
-    # --- Direct image fetch (kept for completeness) ---
     def fetch_image(self, url: str) -> Image.Image | None:
         try:
-            # simple request get
-            r = requests.get(url, timeout=20)
+            r = self.http.get(url, timeout=20)  # use session mirroring browser
             if r.status_code == 200 and r.content:
-                # returns a PIL image or None
                 return Image.open(BytesIO(r.content)).convert("RGB")
         except Exception:
             pass
         return None
 
-    # Turn a market name into the SharePoint folder name we use
     def brand_folder_name(self, market: str) -> str:
-        # a small dictionary
-        mapping = {
-            "lidl": "LIDL",
-            "aldi_nord": "ALDI_NORD",
-            "aldi_sued": "ALDI_SUED",
-        }
+        mapping = {"lidl": "LIDL", "aldi_nord": "ALDI_NORD", "aldi_sued": "ALDI_SUED"}
         return mapping.get((market or "").lower(), "MISC")
 
-    # main flow
+    # --- helper to mirror browser cookies into requests.Session ---
+    def _sync_cookies_to_session(self, driver):
+        try:
+            self.http.cookies.clear()
+            for c in driver.get_cookies():
+                self.http.cookies.set(
+                    c.get("name"),
+                    c.get("value"),
+                    domain=c.get("domain"),
+                    path=c.get("path") or "/",
+                )
+        except Exception:
+            pass
+
     def handle(self, *args, **opts):
-        # decide modes:1.starting URL 2.how many pages to fetch 3.how to build filename 4.which flyer to prefer on overview
         baseurl = opts["baseurl"]
         pages = opts["pages"]
         filename_mode = opts.get("filename_mode", "auto")
         rk_pick_mode = opts.get("rk_pick", "current")
-        # Log a short job header so we see what was passed in
+
         self._log(
             "INFO",
             "START job baseurl=",
@@ -739,7 +675,6 @@ class Command(BaseCommand):
         )
         original_input = baseurl
         u_low_in = original_input.lower()
-        # Try to guess the retailer from the input URL
         retailer_hint = (
             "lidl"
             if "lidl" in u_low_in
@@ -756,9 +691,6 @@ class Command(BaseCommand):
         self._log("DBG", "retailer_hint:", retailer_hint)
 
         #  --- 2) Rabatt-Kompass OVERVIEW → resolve to a specific viewer -----------
-        # If we were given a RK overview page (not a /prospekt-<id>-0 viewer),
-        # open a temporary Chrome, collect candidate viewer links, score them,
-        # and pick the best one according to rk_pick_mode ("current" / "upcoming" / "latest").
         resolved_slug = None
         if "rabatt-kompass.de" in baseurl and "/prospekt-" not in baseurl:
             try:
@@ -767,7 +699,6 @@ class Command(BaseCommand):
                 try:
                     tmp_driver.get(baseurl)
                     self._wait_cloudflare(tmp_driver)
-                    # dismiss cookie banner if present
                     try:
                         WebDriverWait(tmp_driver, 3).until(
                             EC.element_to_be_clickable(
@@ -777,21 +708,16 @@ class Command(BaseCommand):
                         time.sleep(0.2)
                     except Exception:
                         pass
-
-                    # a) collect unique links that look like prospekt viewers
                     links = tmp_driver.find_elements(
                         By.CSS_SELECTOR, "a[href*='/prospekt-'][href$='-0']"
                     )
-                    hrefs = []
-                    seen = set()
+                    hrefs, seen = [], set()
                     for a in links:
                         h = a.get_attribute("href") or ""
                         if h and h not in seen:
                             hrefs.append(a)
                             seen.add(h)
                     self._log("DBG", f"RK overview → found viewer links: {len(hrefs)}")
-
-                    # b) overview score
                     overview_scored = []
                     for a in hrefs:
                         sc, href, why = self._score_rk_viewer_link(
@@ -802,14 +728,12 @@ class Command(BaseCommand):
 
                     top = overview_scored[:6]
                     if not top:
-                        # Regex fallback when DOM is empty
                         html = tmp_driver.page_source or ""
                         raw = re.findall(
                             r'https://rabatt-kompass\.de/[^"\'\s]*/prospekt-\d+-0', html
                         )
                         raw = list(dict.fromkeys(raw))
                         self._log("DBG", f"RK overview regex → {len(raw)} candidates")
-
                         verified = []
                         for href in raw[:12]:
                             det = self._inspect_viewer_details(tmp_driver, href)
@@ -824,13 +748,11 @@ class Command(BaseCommand):
                                 }
                             )
 
-                        # Helper: pick the best item by a given status
                         def pick_by_status(desired):
                             c = [v for v in verified if v["status"] == desired]
                             return max(c, key=lambda v: v["total"]) if c else None
 
                         choice = None
-                        # Choose final target depending on rk_pick_mode
                         if rk_pick_mode == "current":
                             choice = (
                                 pick_by_status("current")
@@ -842,10 +764,9 @@ class Command(BaseCommand):
                                 v for v in verified if v["status"] == "upcoming"
                             ]
                             if upcoming and any(v["start"] for v in upcoming):
-                                # prefer the earliest start date when available
                                 upcoming.sort(
                                     key=lambda v: (
-                                        v["start"] or datetime.date.max,
+                                        (v["start"] or datetime.date.max),
                                         -v["total"],
                                     )
                                 )
@@ -862,7 +783,6 @@ class Command(BaseCommand):
                                 reverse=True,
                             )
                             choice = verified[0] if verified else None
-
                         if choice:
                             baseurl = choice["href"]
                             resolved_slug = self.viewer_slug(baseurl)
@@ -878,8 +798,6 @@ class Command(BaseCommand):
                             ensure_ascii=False,
                         )
                         self._log("DBG", "RK candidates (top 6):", f"\n{dump}")
-
-                        # open each top viewer and extract *real* dates/status
                         verified = []
                         for sc, href, why in top:
                             detail = self._inspect_viewer_details(tmp_driver, href)
@@ -897,7 +815,6 @@ class Command(BaseCommand):
                                 }
                             )
 
-                        # Helper: pick best item by status using 'total'
                         def pick_by_status(desired: str):
                             cands = [v for v in verified if v["status"] == desired]
                             return (
@@ -905,7 +822,6 @@ class Command(BaseCommand):
                             )
 
                         choice = None
-                        # choose final target based on rk_pick_mode
                         if rk_pick_mode == "current":
                             choice = (
                                 pick_by_status("current")
@@ -913,14 +829,13 @@ class Command(BaseCommand):
                                 or pick_by_status("upcoming")
                             )
                         elif rk_pick_mode == "upcoming":
-                            # for upcoming prefer earliest start date if available
                             upcoming = [
                                 v for v in verified if v["status"] == "upcoming"
                             ]
                             if upcoming and any(v["start"] for v in upcoming):
                                 upcoming.sort(
                                     key=lambda v: (
-                                        v["start"] or datetime.date.max,
+                                        (v["start"] or datetime.date.max),
                                         -v["total"],
                                     )
                                 )
@@ -929,8 +844,7 @@ class Command(BaseCommand):
                                 choice = pick_by_status("upcoming") or pick_by_status(
                                     "current"
                                 )
-                        else:  # latest
-                            # latest by id, but still include total score to break ties
+                        else:
                             verified.sort(
                                 key=lambda v: (
                                     int(
@@ -943,7 +857,6 @@ class Command(BaseCommand):
                                 reverse=True,
                             )
                             choice = verified[0]
-
                         best_href = choice["href"] if choice else top[0][1]
                         self._log("INFO", "Redirecting to viewer:", best_href)
                         baseurl = best_href
@@ -970,6 +883,14 @@ class Command(BaseCommand):
 
         self._apply_basic_stealth(driver)
 
+        # --- requests.Session that mirrors the browser ---
+        self.http = requests.Session()
+        try:
+            ua = driver.execute_script("return navigator.userAgent") or "Mozilla/5.0"
+        except Exception:
+            ua = "Mozilla/5.0"
+        self.http.headers.update({"User-Agent": ua})
+
         images: list[Image.Image] = []
         slug_for_filename: str | None = None
         found_total_pages: int | None = None
@@ -979,7 +900,6 @@ class Command(BaseCommand):
         # loop through pages
         try:
             for i in range(1, pages + 1):
-                # Stop if we already know the true total count
                 if found_total_pages and i > found_total_pages:
                     self._log(
                         "INFO",
@@ -1000,6 +920,17 @@ class Command(BaseCommand):
                 except Exception:
                     pass
 
+                # Click the explicit anchor if present (more reliable than only hash)
+                try:
+                    link = WebDriverWait(driver, 2).until(
+                        EC.element_to_be_clickable(
+                            (By.CSS_SELECTOR, f'a[href$="#page_{i}"]')
+                        )
+                    )
+                    link.click()
+                except Exception:
+                    pass
+                # Ensure hash reflects the target and dispatch event
                 try:
                     driver.execute_script(
                         f"if (location.hash !== '#page_{i}') location.hash = '#page_{i}';"
@@ -1009,6 +940,14 @@ class Command(BaseCommand):
                     )
                 except Exception:
                     pass
+
+                # Keep Referer and cookies mirrored for hotlink-protected image GETs
+                try:
+                    self.http.headers["Referer"] = driver.current_url or baseurl
+                except Exception:
+                    pass
+                self._sync_cookies_to_session(driver)
+
                 # If viewer clamped (e.g., requested 46, showing 45)
                 try:
                     actual = self._current_page_from_url(driver.current_url or url)
@@ -1022,6 +961,8 @@ class Command(BaseCommand):
                 if i == 1:
                     self.accept_cookies_if_present(driver)
                     self._wait_first_page_ready(driver)
+                    # sync cookies once more after consent banners
+                    self._sync_cookies_to_session(driver)
 
                     # filename slug
                     current = driver.current_url or baseurl
@@ -1041,7 +982,7 @@ class Command(BaseCommand):
                         slug_for_filename,
                     )
 
-                    # Try to detect the real total pages from page 1
+                    # Auto-stop mode: don't guess total pages
                     self._log("DBG", "Skipping total detection (auto-stop mode).")
 
                 try:
@@ -1051,6 +992,7 @@ class Command(BaseCommand):
                 except Exception:
                     pass
 
+                # Wait for the main image src to differ from previous page
                 img_url = None
                 for _ in range(20):
                     cand = self.pick_image_url(driver)
@@ -1058,37 +1000,16 @@ class Command(BaseCommand):
                         img_url = cand
                         break
                     time.sleep(0.25)
-
-                # If no direct image URL -> try visual fallback before deciding to stop
                 if not img_url:
                     img_url = self.pick_image_url(driver)
 
-                # We have an image URL → try high-res and GET
-                hi_url = (
-                    re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
-                    if "/public/gimg/" in img_url
-                    else img_url
-                )
-                self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
-
-                try:
-                    r = requests.get(hi_url, timeout=20)
-                    self._log(
-                        "DBG",
-                        "GET",
-                        hi_url,
-                        "->",
-                        r.status_code,
-                        "lenHdr=",
-                        len(r.content) if r.ok else 0,
-                    )
-                    if r.status_code == 200 and r.content:
-                        # Perceptual duplicate check (visual)
+                # If still nothing, try screenshot path
+                if not img_url:
+                    self._log("INFO", "No direct image URL; trying visual fallback…")
+                    png_bytes = self._capture_best_visual(driver)
+                    if png_bytes:
                         try:
-                            img = Image.open(BytesIO(r.content)).convert("RGB")
-                        except Exception:
-                            img = None
-                        if img is not None:
+                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
                             fp = self._img_dhash(img)
                             if (
                                 i > 1
@@ -1102,13 +1023,89 @@ class Command(BaseCommand):
                                 )
                                 break
                             last_fp = fp
+                            images.append(img)
+                            prev_main_src = f"fp:{fp}"
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                            )
+                            continue
+                        except Exception:
+                            self._log("INFO", "Could not decode fallback visual.")
+                    else:
+                        self._log(
+                            "INFO",
+                            f"No visual content captured on page {i}. Stopping here.",
+                        )
+                        break
 
-                            # optional MD5 for debugging logs
+                # We have an image URL → try high-res and GET with session
+                hi_url = (
+                    re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
+                    if "/public/gimg/" in img_url
+                    else img_url
+                )
+                self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
+
+                try:
+                    r = self.http.get(
+                        hi_url, timeout=20
+                    )  # <- session with cookies + UA + Referer
+                    self._log(
+                        "DBG",
+                        "GET",
+                        hi_url,
+                        "->",
+                        r.status_code,
+                        "lenHdr=",
+                        len(r.content) if r.ok else 0,
+                    )
+                    if r.status_code == 200 and r.content:
+                        try:
+                            img = Image.open(BytesIO(r.content)).convert("RGB")
+                        except Exception:
+                            img = None
+                        if img is not None:
+                            fp = self._img_dhash(img)
+                            if (
+                                i > 1
+                                and last_fp is not None
+                                and self._ham(fp, last_fp) <= 2
+                            ):
+                                # try screenshot before stopping
+                                self._log(
+                                    "INFO",
+                                    "Downloaded image looks duplicate; trying visual screenshot instead…",
+                                )
+                                png_bytes2 = self._capture_best_visual(driver)
+                                if png_bytes2:
+                                    try:
+                                        img2 = Image.open(BytesIO(png_bytes2)).convert(
+                                            "RGB"
+                                        )
+                                        fp2 = self._img_dhash(img2)
+                                        if self._ham(fp2, last_fp) > 2:
+                                            images.append(img2)
+                                            prev_main_src = f"fp:{fp2}"
+                                            last_fp = fp2
+                                            self._log(
+                                                "INFO",
+                                                f"Page {i}: added screenshot after duplicate download. Total now {len(images)}",
+                                            )
+                                            continue
+                                    except Exception:
+                                        pass
+                                found_total_pages = i - 1
+                                self._log(
+                                    "INFO",
+                                    f"Visually same as page {found_total_pages}. Stopping.",
+                                )
+                                break
+                            last_fp = fp
                             md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
                             self._log(
                                 "DBG", "Downloaded bytes:", len(r.content), "md5=", md5
                             )
-
                             images.append(img)
                             prev_main_src = img_url
                             self._log(
@@ -1371,6 +1368,7 @@ class Command(BaseCommand):
                         f"Folder check failed for '{parent_path}': {r.status_code} {r.text}"
                     )
 
+        today = datetime.date.today()
         subpath = "/".join(sharepoint_folder.split("/")[1:])
         year_folder = f"{today.year}"
         brand_folder = self.brand_folder_name(market)
