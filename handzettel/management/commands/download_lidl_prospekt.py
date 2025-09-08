@@ -16,6 +16,7 @@ from selenium.webdriver.chrome.options import Options
 import selenium  # for version-based quirks if ever needed
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -29,49 +30,42 @@ import msal  # microsoft authentication library
 load_dotenv()
 
 
-# standard django container --> it s a Django management command, it downloads a flyer from a website and makes PDF
 class Command(BaseCommand):
     help = "Download a flyer as a PDF (supports rabatt-kompass.de and lidl.de)."
 
-    # define command line inputs
+    # -------- CLI --------
     def add_arguments(self, parser):
         parser.add_argument(
-            # text
-            "baseurl",  # direct viewr URL --> the page to start from
+            "baseurl",
             type=str,
             help=(
                 "rabatt-kompass overview OR Lidl URL. "
-                "For Lidl include /page/1 or the base; for rabatt-kompass an overview like "
-                ".../aldi-sued-prospekt is fine."
+                "For Lidl include /page/1 or the base; for rabatt-kompass a viewer or overview like "
+                ".../lidl-prospekte/prospekt-<id>-0 or .../aldi-sued-prospekt is fine."
             ),
         )
         parser.add_argument(
-            # number
             "pages",
             type=int,
-            help="How many pages to download (e.g., 36)",  # how many pages to fetch
+            help="Maximum pages to try (auto-stops at real end).",
         )
-        # auto(default),overview(use the last part of the input URL),viewer(use the viewer id lik prospekt-123456-0)
         parser.add_argument(
             "--filename-mode",
             choices=["auto", "overview", "viewer"],
             default=os.getenv("FILENAME_MODE", "auto"),
             help=(
-                "How to build the filename slug: "
-                "'auto' = prefer viewer id if available (default), "
-                "'overview' = use the last path segment of the input URL, "
-                "'viewer' = force viewer id."
+                "How to build filename slug: 'auto' (default) prefer viewer id, "
+                "'overview' = last path segment of input URL, 'viewer' = force viewer id."
             ),
         )
-        # which flyer to choose on a rabatt kompass overview page
         parser.add_argument(
             "--rk-pick",
             choices=["current", "upcoming", "latest"],
             default=os.getenv("RK_PICK", "current"),
-            help="On overview pages, pick 'current' (default), 'upcoming' (Vorschau), or 'latest' uploaded id.",
+            help="On RK overview pages, pick 'current' (default), 'upcoming' (Vorschau), or 'latest' uploaded id.",
         )
 
-    # simple logger: Simple console logging like [INFO 12:34:56]
+    # -------- tiny logger --------
     def _log(self, level: str, *parts):
         print(f"[{level} {time.strftime('%H:%M:%S')}]", " ".join(str(p) for p in parts))
 
@@ -127,7 +121,7 @@ class Command(BaseCommand):
                 pass
             break
 
-    # --- Build the correct URL for each page depending on the site ---
+    # ---------- URL helpers ----------
     def page_url(self, baseurl: str, n: int) -> str:
         if "lidl.de" in baseurl:
             if re.search(r"/page/\d+", baseurl):
@@ -149,6 +143,7 @@ class Command(BaseCommand):
         m = re.search(r"/prospekt-(\d+)-0", url)
         return f"prospekt-{m.group(1)}-0" if m else None
 
+    # ---------- Cookies / consent / ready ----------
     def accept_cookies_if_present(self, driver):
         for locator in [
             (By.ID, "onetrust-accept-btn-handler"),
@@ -189,6 +184,7 @@ class Command(BaseCommand):
         except Exception:
             pass
 
+    # ---------- RK overview scoring (unchanged core) ----------
     def _extract_date_range(self, blob_lower: str):
         today = datetime.date.today()
         year = today.year
@@ -345,14 +341,16 @@ class Command(BaseCommand):
                 b = max(0, 160 - 8 * days)
                 date_bonus += b
                 reasons.append(f"overview:ab_future+{b}")
-
         s += date_bonus
+
         phrase_b, why = self._retailer_phrase_bonus(blob, retailer_hint, mode)
         s += phrase_b
         reasons.extend(why)
+
         id_b, why_id = self._id_bias(href, mode)
         s += id_b
         reasons.append(why_id)
+
         return int(s), href, ", ".join(reasons)
 
     def _inspect_viewer_details(self, driver, href: str):
@@ -374,7 +372,6 @@ class Command(BaseCommand):
                 html = head + "\n" + html
             except Exception:
                 pass
-
             start, end = self._extract_date_range(html)
             today = datetime.date.today()
             is_vorschau = any(
@@ -434,7 +431,7 @@ class Command(BaseCommand):
                 "reason": f"viewer:error {e}",
             }
 
-    # --- Find one good image URL on the current page
+    # ---------- Visual selection & hashing ----------
     def pick_image_url(self, driver) -> str | None:
         on_rk = "rabatt-kompass.de" in (driver.current_url or "")
         imgs = (
@@ -519,12 +516,18 @@ class Command(BaseCommand):
                 if any(k in u.lower() for k in ("thumb", "icon", "small")):
                     score -= 200_000
             cands.append((score, u, w, h, vis))
+
         if cands:
             cands.sort(key=lambda t: t[0], reverse=True)
             self._log("DBG", f"Collected candidate visuals: {len(cands)}")
             self._log("DBG", "TOP CANDIDATES:")
             for score, src, w, h, vis in cands[:8]:
-                extra = "rk_gimg+8e5" if on_rk and "/public/gimg/" in src else ""
+                extra = (
+                    "rk_gimg+8e5"
+                    if "/public/gimg/" in src
+                    and "rabatt-kompass.de" in (driver.current_url or "")
+                    else ""
+                )
                 print(f"    {score:8.0f}  [img]  {src}  :: {w}x{h}, vis={vis}, {extra}")
             chosen = cands[0][1]
             self._log("DBG", "Chosen image URL:", chosen)
@@ -583,36 +586,6 @@ class Command(BaseCommand):
         except Exception:
             return None
 
-    def _current_page_from_url(self, url: str) -> int | None:
-        m = re.search(r"(?:#page_|/page/)(\d+)", url or "")
-        return int(m.group(1)) if m else None
-
-    def _detect_total_pages(self, driver) -> int | None:
-        try:
-            html = driver.page_source or ""
-        except Exception:
-            html = ""
-        m = re.search(r"(?:Seite|Page)\s*\d+\s*/\s*(\d{1,3})", html, re.I)
-        if m:
-            return int(m.group(1))
-        for key in ("pageCount", "totalPages", "pagesTotal", "numPages"):
-            m = re.search(rf'"{key}"\s*:\s*(\d{{1,3}})', html)
-            if m:
-                return int(m.group(1))
-        try:
-            thumbs = driver.find_elements(By.CSS_SELECTOR, "a[href*='#page_']")
-            nums = []
-            for a in thumbs:
-                href = a.get_attribute("href") or ""
-                mm = re.search(r"#page_(\d+)", href)
-                if mm:
-                    nums.append(int(mm.group(1)))
-            if nums:
-                return max(nums)
-        except Exception:
-            pass
-        return None
-
     def _img_dhash(self, img: Image.Image) -> int:
         small = img.convert("L").resize((9, 8), Image.LANCZOS)
         px = list(small.getdata())
@@ -631,33 +604,127 @@ class Command(BaseCommand):
             cnt += 1
         return cnt
 
-    def fetch_image(self, url: str) -> Image.Image | None:
+    # ---------- RK viewer context & navigation ----------
+    def _enter_rk_viewer_frame(self, driver) -> bool:
+        """Try to switch into the rabatt-kompass viewer iframe."""
+        driver.switch_to.default_content()
+        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
+        for idx, f in enumerate(frames):
+            try:
+                driver.switch_to.frame(f)
+                ok = driver.execute_script(
+                    "return !!document.querySelector(\"img[src*='/public/gimg/'], a[href*='#page_']\");"
+                )
+                if ok:
+                    self._log("DBG", f"Entered viewer iframe #{idx}")
+                    return True
+            except Exception:
+                pass
+            finally:
+                driver.switch_to.default_content()
+        return False
+
+    def _switch_to_viewer_context(self, driver) -> None:
+        """Ensure we are in a context that can see the flyer image elements."""
         try:
-            r = self.http.get(url, timeout=20)  # use session mirroring browser
-            if r.status_code == 200 and r.content:
-                return Image.open(BytesIO(r.content)).convert("RGB")
+            ok = driver.execute_script(
+                "try { return !!document.querySelector(\"img[src*='/public/gimg/']\"); } catch(e){ return false; }"
+            )
+            if ok:
+                return
         except Exception:
             pass
-        return None
+        # not found, try iframe
+        self._enter_rk_viewer_frame(driver)
+        # if no iframe found, we remain at default_content (picker will still try)
 
+    def _goto_rk_page_in_context(self, driver, n: int) -> None:
+        """Navigate to page n within the current browsing context (top or frame)."""
+        # 1) Click thumbnail when available
+        thumbs = driver.find_elements(By.CSS_SELECTOR, f"a[href$='#page_{n}']")
+        if thumbs:
+            try:
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'})", thumbs[0]
+                )
+                thumbs[0].click()
+                return
+            except Exception:
+                pass
+        # 2) Change hash in-place
+        try:
+            driver.execute_script(
+                f"if (location.hash !== '#page_{n}') location.hash = '#page_{n}';"
+            )
+            driver.execute_script(
+                "window.dispatchEvent(new HashChangeEvent('hashchange'));"
+            )
+            return
+        except Exception:
+            pass
+        # 3) Keyboard arrow (best effort)
+        if n > 1:
+            try:
+                body = driver.find_element(By.TAG_NAME, "body")
+                body.send_keys(Keys.ARROW_RIGHT)
+            except Exception:
+                pass
+
+    def _current_main_img_src(self, driver) -> str | None:
+        """Pick the largest visible /public/gimg/ image as the main page image."""
+        best, best_area = None, 0
+        for el in driver.find_elements(By.CSS_SELECTOR, "img[src*='/public/gimg/']"):
+            if not el.is_displayed():
+                continue
+            try:
+                w = el.size.get("width", 0)
+                h = el.size.get("height", 0)
+                area = max(0, w) * max(0, h)
+                src = el.get_attribute("currentSrc") or el.get_attribute("src") or ""
+                if src and area > best_area:
+                    best, best_area = src, area
+            except Exception:
+                continue
+        return best
+
+    def _wait_main_img_src_changed(
+        self, driver, old_src: str | None, timeout: float = 8.0
+    ) -> str | None:
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            new_src = self._current_main_img_src(driver)
+            if new_src and new_src != old_src:
+                return new_src
+            time.sleep(0.25)
+        return self._current_main_img_src(driver)
+
+    def _make_session_from_browser(self, driver, referer: str) -> requests.Session:
+        s = requests.Session()
+        try:
+            for c in driver.get_cookies():
+                s.cookies.set(
+                    c.get("name"),
+                    c.get("value"),
+                    domain=c.get("domain"),
+                    path=c.get("path"),
+                )
+        except Exception:
+            pass
+        try:
+            ua = driver.execute_script("return navigator.userAgent") or ""
+            if ua:
+                s.headers["User-Agent"] = ua
+        except Exception:
+            pass
+        s.headers["Referer"] = referer
+        return s
+
+    # ---------- SharePoint helpers ----------
     def brand_folder_name(self, market: str) -> str:
         mapping = {"lidl": "LIDL", "aldi_nord": "ALDI_NORD", "aldi_sued": "ALDI_SUED"}
         return mapping.get((market or "").lower(), "MISC")
 
-    # --- helper to mirror browser cookies into requests.Session ---
-    def _sync_cookies_to_session(self, driver):
-        try:
-            self.http.cookies.clear()
-            for c in driver.get_cookies():
-                self.http.cookies.set(
-                    c.get("name"),
-                    c.get("value"),
-                    domain=c.get("domain"),
-                    path=c.get("path") or "/",
-                )
-        except Exception:
-            pass
-
+    # ---------- Main ----------
     def handle(self, *args, **opts):
         baseurl = opts["baseurl"]
         pages = opts["pages"]
@@ -690,7 +757,7 @@ class Command(BaseCommand):
         )
         self._log("DBG", "retailer_hint:", retailer_hint)
 
-        #  --- 2) Rabatt-Kompass OVERVIEW → resolve to a specific viewer -----------
+        # Resolve RK overview -> viewer
         resolved_slug = None
         if "rabatt-kompass.de" in baseurl and "/prospekt-" not in baseurl:
             try:
@@ -725,7 +792,6 @@ class Command(BaseCommand):
                         )
                         overview_scored.append((sc, href, why))
                     overview_scored.sort(key=lambda t: t[0], reverse=True)
-
                     top = overview_scored[:6]
                     if not top:
                         html = tmp_driver.page_source or ""
@@ -752,7 +818,6 @@ class Command(BaseCommand):
                             c = [v for v in verified if v["status"] == desired]
                             return max(c, key=lambda v: v["total"]) if c else None
 
-                        choice = None
                         if rk_pick_mode == "current":
                             choice = (
                                 pick_by_status("current")
@@ -821,7 +886,6 @@ class Command(BaseCommand):
                                 max(cands, key=lambda v: v["total"]) if cands else None
                             )
 
-                        choice = None
                         if rk_pick_mode == "current":
                             choice = (
                                 pick_by_status("current")
@@ -866,7 +930,7 @@ class Command(BaseCommand):
             except Exception as e:
                 self._log("DBG", "overview resolver error:", e)
 
-        #  Start headless Chrome (main)
+        # Launch Chrome (main)
         chrome_options = self._configure_chrome_options()
         chromedriver_path = os.getenv("CHROMEDRIVER", "").strip()
         try:
@@ -883,129 +947,157 @@ class Command(BaseCommand):
 
         self._apply_basic_stealth(driver)
 
-        # --- requests.Session that mirrors the browser ---
-        self.http = requests.Session()
-        try:
-            ua = driver.execute_script("return navigator.userAgent") or "Mozilla/5.0"
-        except Exception:
-            ua = "Mozilla/5.0"
-        self.http.headers.update({"User-Agent": ua})
-
         images: list[Image.Image] = []
         slug_for_filename: str | None = None
         found_total_pages: int | None = None
-        last_fp: int | None = None  # perceptual fingerprint of previous page (dHash)
-        prev_main_src: str | None = None
+        last_fp: int | None = None
 
-        # loop through pages
         try:
-            for i in range(1, pages + 1):
-                if found_total_pages and i > found_total_pages:
-                    self._log(
-                        "INFO",
-                        f"Stopping at page {found_total_pages} (detected total).",
-                    )
-                    break
-
-                url = self.page_url(baseurl, i)
-                self._log("INFO", f"Loading page {i}:", url)
-                driver.get(url)
+            # ---- SITE SWITCH: RK vs Lidl ----
+            if "rabatt-kompass.de" in baseurl:
+                # Open viewer ONCE
+                driver.get(
+                    baseurl if "/prospekt-" in baseurl else self.page_url(baseurl, 1)
+                )
                 self._wait_cloudflare(driver)
-                try:
-                    driver.execute_script(
-                        "window.scrollTo(0, document.body.scrollHeight);"
-                    )
-                    time.sleep(0.3)
-                    driver.execute_script("window.scrollTo(0, 0);")
-                except Exception:
-                    pass
+                self.accept_cookies_if_present(driver)
+                self._wait_first_page_ready(driver)
 
-                # Click the explicit anchor if present (more reliable than only hash)
-                try:
-                    link = WebDriverWait(driver, 2).until(
-                        EC.element_to_be_clickable(
-                            (By.CSS_SELECTOR, f'a[href$="#page_{i}"]')
+                # enter viewer context if present
+                self._switch_to_viewer_context(driver)
+
+                # filename slug
+                current = driver.current_url or baseurl
+                candidate_viewer = resolved_slug or self.viewer_slug(current)
+                overview_slug = self.url_slug(original_input)
+                slug_for_filename = (
+                    candidate_viewer
+                    if filename_mode in ("auto", "viewer") and candidate_viewer
+                    else overview_slug
+                )
+                self._log(
+                    "INFO",
+                    "Using slug for filename (mode:",
+                    filename_mode,
+                    "):",
+                    slug_for_filename,
+                )
+
+                session = self._make_session_from_browser(
+                    driver, referer=driver.current_url or baseurl
+                )
+                prev_src = None
+
+                for i in range(1, pages + 1):
+                    self._log("INFO", f"Paging to RK page {i}")
+                    self._switch_to_viewer_context(driver)
+                    self._goto_rk_page_in_context(driver, i)
+
+                    # Wait for actual change of main image
+                    new_src = self._wait_main_img_src_changed(
+                        driver, prev_src, timeout=8.0
+                    )
+
+                    if i > 1 and (not new_src or new_src == prev_src):
+                        found_total_pages = i - 1
+                        self._log(
+                            "INFO",
+                            f"Reached end at page {found_total_pages}. Stopping.",
                         )
-                    )
-                    link.click()
-                except Exception:
-                    pass
-                # Ensure hash reflects the target and dispatch event
-                try:
-                    driver.execute_script(
-                        f"if (location.hash !== '#page_{i}') location.hash = '#page_{i}';"
-                    )
-                    driver.execute_script(
-                        "window.dispatchEvent(new HashChangeEvent('hashchange'));"
-                    )
-                except Exception:
-                    pass
-
-                # Keep Referer and cookies mirrored for hotlink-protected image GETs
-                try:
-                    self.http.headers["Referer"] = driver.current_url or baseurl
-                except Exception:
-                    pass
-                self._sync_cookies_to_session(driver)
-
-                # If viewer clamped (e.g., requested 46, showing 45)
-                try:
-                    actual = self._current_page_from_url(driver.current_url or url)
-                    if actual is not None and actual < i:
-                        found_total_pages = actual
-                        self._log("INFO", f"Viewer clamped at page {actual}. Stopping.")
                         break
-                except Exception:
-                    pass
 
-                if i == 1:
-                    self.accept_cookies_if_present(driver)
-                    self._wait_first_page_ready(driver)
-                    # sync cookies once more after consent banners
-                    self._sync_cookies_to_session(driver)
+                    if not new_src:
+                        self._log(
+                            "INFO",
+                            f"No main image on page {i}; trying visual fallback…",
+                        )
+                        png_bytes = self._capture_best_visual(driver)
+                        if not png_bytes:
+                            self._log(
+                                "INFO", f"No visual content on page {i}. Stopping."
+                            )
+                            break
+                        try:
+                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
+                            fp = self._img_dhash(img)
+                            if (
+                                i > 1
+                                and last_fp is not None
+                                and self._ham(fp, last_fp) <= 2
+                            ):
+                                found_total_pages = i - 1
+                                self._log(
+                                    "INFO",
+                                    f"Visually same as page {found_total_pages}. Stopping.",
+                                )
+                                break
+                            last_fp = fp
+                            images.append(img)
+                            prev_src = f"fp:{fp}"
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                            )
+                            continue
+                        except Exception:
+                            self._log("INFO", "Could not decode fallback visual.")
+                            break
 
-                    # filename slug
-                    current = driver.current_url or baseurl
-                    candidate_viewer = resolved_slug or self.viewer_slug(current)
-                    overview_slug = self.url_slug(original_input)
-                    if filename_mode == "viewer":
-                        slug_for_filename = candidate_viewer or overview_slug
-                    elif filename_mode == "overview":
-                        slug_for_filename = overview_slug
-                    else:
-                        slug_for_filename = candidate_viewer or overview_slug
-                    self._log(
-                        "INFO",
-                        "Using slug for filename (mode:",
-                        filename_mode,
-                        "):",
-                        slug_for_filename,
+                    prev_src = new_src
+
+                    # Safer hi-res: replace trailing -{size}-{token}.ext only (won't hit the year)
+                    hi_url = (
+                        re.sub(
+                            r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
+                            r"-2000-\2.\3",
+                            new_src,
+                            flags=re.I,
+                        )
+                        or new_src
                     )
 
-                    # Auto-stop mode: don't guess total pages
-                    self._log("DBG", "Skipping total detection (auto-stop mode).")
+                    self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
+                    try:
+                        r = session.get(hi_url, timeout=20)
+                        self._log(
+                            "DBG",
+                            "GET",
+                            hi_url,
+                            "->",
+                            r.status_code,
+                            "lenHdr=",
+                            len(r.content) if r.ok else 0,
+                        )
+                        if r.status_code == 200 and r.content:
+                            try:
+                                img = Image.open(BytesIO(r.content)).convert("RGB")
+                            except Exception:
+                                img = None
+                            if img is not None:
+                                fp = self._img_dhash(img)
+                                if (
+                                    i > 1
+                                    and last_fp is not None
+                                    and self._ham(fp, last_fp) <= 2
+                                ):
+                                    found_total_pages = i - 1
+                                    self._log(
+                                        "INFO",
+                                        f"Visually same as page {found_total_pages}. Stopping.",
+                                    )
+                                    break
+                                last_fp = fp
+                                images.append(img)
+                                self._log(
+                                    "INFO",
+                                    f"Page {i}: added image. Total now {len(images)}",
+                                )
+                                continue
+                    except Exception as e:
+                        self._log("DBG", "Direct GET failed:", e)
 
-                try:
-                    WebDriverWait(driver, 8).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "img"))
-                    )
-                except Exception:
-                    pass
-
-                # Wait for the main image src to differ from previous page
-                img_url = None
-                for _ in range(20):
-                    cand = self.pick_image_url(driver)
-                    if cand and cand != prev_main_src:
-                        img_url = cand
-                        break
-                    time.sleep(0.25)
-                if not img_url:
-                    img_url = self.pick_image_url(driver)
-
-                # If still nothing, try screenshot path
-                if not img_url:
-                    self._log("INFO", "No direct image URL; trying visual fallback…")
+                    # Fallback screenshot in viewer
+                    self._log("INFO", "Direct download failed; trying visual fallback…")
                     png_bytes = self._capture_best_visual(driver)
                     if png_bytes:
                         try:
@@ -1024,7 +1116,6 @@ class Command(BaseCommand):
                                 break
                             last_fp = fp
                             images.append(img)
-                            prev_main_src = f"fp:{fp}"
                             self._log(
                                 "INFO",
                                 f"Page {i}: added fallback screenshot. Total now {len(images)}",
@@ -1032,69 +1123,71 @@ class Command(BaseCommand):
                             continue
                         except Exception:
                             self._log("INFO", "Could not decode fallback visual.")
-                    else:
+                            break
+
+            else:
+                # LIDL.DE PATH: use /page/{n} in the top page as before
+                for i in range(1, pages + 1):
+                    url = self.page_url(baseurl, i)
+                    self._log("INFO", f"Loading page {i}:", url)
+                    driver.get(url)
+                    self._wait_cloudflare(driver)
+                    try:
+                        driver.execute_script(
+                            "window.scrollTo(0, document.body.scrollHeight);"
+                        )
+                        time.sleep(0.3)
+                        driver.execute_script("window.scrollTo(0, 0);")
+                    except Exception:
+                        pass
+
+                    if i == 1:
+                        self.accept_cookies_if_present(driver)
+                        self._wait_first_page_ready(driver)
+                        current = driver.current_url or baseurl
+                        candidate_viewer = self.viewer_slug(current)
+                        overview_slug = self.url_slug(original_input)
+                        if filename_mode == "viewer":
+                            slug_for_filename = candidate_viewer or overview_slug
+                        elif filename_mode == "overview":
+                            slug_for_filename = overview_slug
+                        else:
+                            slug_for_filename = candidate_viewer or overview_slug
                         self._log(
                             "INFO",
-                            f"No visual content captured on page {i}. Stopping here.",
+                            "Using slug for filename (mode:",
+                            filename_mode,
+                            "):",
+                            slug_for_filename,
                         )
-                        break
 
-                # We have an image URL → try high-res and GET with session
-                hi_url = (
-                    re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
-                    if "/public/gimg/" in img_url
-                    else img_url
-                )
-                self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
+                    try:
+                        WebDriverWait(driver, 8).until(
+                            EC.presence_of_element_located((By.TAG_NAME, "img"))
+                        )
+                    except Exception:
+                        pass
 
-                try:
-                    r = self.http.get(
-                        hi_url, timeout=20
-                    )  # <- session with cookies + UA + Referer
-                    self._log(
-                        "DBG",
-                        "GET",
-                        hi_url,
-                        "->",
-                        r.status_code,
-                        "lenHdr=",
-                        len(r.content) if r.ok else 0,
-                    )
-                    if r.status_code == 200 and r.content:
+                    img_url = self.pick_image_url(driver)
+                    if not img_url:
+                        self._log(
+                            "INFO", "No direct image URL; trying visual fallback…"
+                        )
+                        png_bytes = self._capture_best_visual(driver)
+                        if not png_bytes:
+                            self._log(
+                                "INFO",
+                                f"No visual content captured on page {i}. Stopping here.",
+                            )
+                            break
                         try:
-                            img = Image.open(BytesIO(r.content)).convert("RGB")
-                        except Exception:
-                            img = None
-                        if img is not None:
+                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
                             fp = self._img_dhash(img)
                             if (
                                 i > 1
                                 and last_fp is not None
                                 and self._ham(fp, last_fp) <= 2
                             ):
-                                # try screenshot before stopping
-                                self._log(
-                                    "INFO",
-                                    "Downloaded image looks duplicate; trying visual screenshot instead…",
-                                )
-                                png_bytes2 = self._capture_best_visual(driver)
-                                if png_bytes2:
-                                    try:
-                                        img2 = Image.open(BytesIO(png_bytes2)).convert(
-                                            "RGB"
-                                        )
-                                        fp2 = self._img_dhash(img2)
-                                        if self._ham(fp2, last_fp) > 2:
-                                            images.append(img2)
-                                            prev_main_src = f"fp:{fp2}"
-                                            last_fp = fp2
-                                            self._log(
-                                                "INFO",
-                                                f"Page {i}: added screenshot after duplicate download. Total now {len(images)}",
-                                            )
-                                            continue
-                                    except Exception:
-                                        pass
                                 found_total_pages = i - 1
                                 self._log(
                                     "INFO",
@@ -1102,54 +1195,83 @@ class Command(BaseCommand):
                                 )
                                 break
                             last_fp = fp
-                            md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
-                            self._log(
-                                "DBG", "Downloaded bytes:", len(r.content), "md5=", md5
-                            )
                             images.append(img)
-                            prev_main_src = img_url
                             self._log(
                                 "INFO",
-                                f"Page {i}: added image. Total now {len(images)}",
+                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
                             )
                             continue
-                except Exception as e:
-                    self._log("DBG", "Direct GET failed:", e)
+                        except Exception:
+                            self._log("INFO", "Could not decode fallback visual.")
+                            break
 
-                # Direct GET failed or empty -> try visual fallback
-                self._log("INFO", "Direct download failed; trying visual fallback…")
-                png_bytes = self._capture_best_visual(driver)
-                if png_bytes:
+                    self._log("DBG", "Chosen (possibly hi-res) image:", img_url)
                     try:
-                        img = Image.open(BytesIO(png_bytes)).convert("RGB")
-                        fp = self._img_dhash(img)
-                        if (
-                            i > 1
-                            and last_fp is not None
-                            and self._ham(fp, last_fp) <= 2
-                        ):
-                            found_total_pages = i - 1
+                        r = requests.get(img_url, timeout=20)
+                        self._log(
+                            "DBG",
+                            "GET",
+                            img_url,
+                            "->",
+                            r.status_code,
+                            "lenHdr=",
+                            len(r.content) if r.ok else 0,
+                        )
+                        if r.status_code == 200 and r.content:
+                            try:
+                                img = Image.open(BytesIO(r.content)).convert("RGB")
+                            except Exception:
+                                img = None
+                            if img is not None:
+                                fp = self._img_dhash(img)
+                                if (
+                                    i > 1
+                                    and last_fp is not None
+                                    and self._ham(fp, last_fp) <= 2
+                                ):
+                                    found_total_pages = i - 1
+                                    self._log(
+                                        "INFO",
+                                        f"Visually same as page {found_total_pages}. Stopping.",
+                                    )
+                                    break
+                                last_fp = fp
+                                images.append(img)
+                                self._log(
+                                    "INFO",
+                                    f"Page {i}: added image. Total now {len(images)}",
+                                )
+                                continue
+                    except Exception as e:
+                        self._log("DBG", "Direct GET failed:", e)
+
+                    self._log("INFO", "Direct download failed; trying visual fallback…")
+                    png_bytes = self._capture_best_visual(driver)
+                    if png_bytes:
+                        try:
+                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
+                            fp = self._img_dhash(img)
+                            if (
+                                i > 1
+                                and last_fp is not None
+                                and self._ham(fp, last_fp) <= 2
+                            ):
+                                found_total_pages = i - 1
+                                self._log(
+                                    "INFO",
+                                    f"Visually same as page {found_total_pages}. Stopping.",
+                                )
+                                break
+                            last_fp = fp
+                            images.append(img)
                             self._log(
                                 "INFO",
-                                f"Visually same as page {found_total_pages}. Stopping.",
+                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
                             )
+                            continue
+                        except Exception:
+                            self._log("INFO", "Could not decode fallback visual.")
                             break
-                        last_fp = fp
-                        images.append(img)
-                        prev_main_src = f"fp:{fp}"
-                        self._log(
-                            "INFO",
-                            f"Page {i}: added fallback screenshot. Total now {len(images)}",
-                        )
-                        continue
-                    except Exception:
-                        self._log("INFO", "Could not decode fallback visual.")
-                else:
-                    self._log(
-                        "INFO",
-                        f"No visual content captured on page {i}. Stopping here.",
-                    )
-                    break
         finally:
             try:
                 driver.quit()
@@ -1161,13 +1283,13 @@ class Command(BaseCommand):
             self._log("INFO", "No page images found!")
             return
 
-        #  Build a single PDF from all images
+        # Build PDF
         pdf = BytesIO()
         images[0].save(pdf, format="PDF", save_all=True, append_images=images[1:])
         pdf.seek(0)
         self._log("INFO", f"PDF built with {len(images)} pages.")
 
-        #  Save into model Handzettel
+        # Save model
         u = original_input.lower() if original_input else baseurl.lower()
         market = (
             "lidl"
@@ -1208,7 +1330,7 @@ class Command(BaseCommand):
         handzettel.save()
         self._log("INFO", f"PDF saved to model as '{filename}'.")
 
-        # Azure SharePoint upload
+        # ------------- SharePoint upload -------------
         self._log("INFO", "Uploading PDF to SharePoint…")
 
         client_id = os.getenv("AZURE_CLIENT_ID")
@@ -1329,7 +1451,6 @@ class Command(BaseCommand):
                         f"WARN: Library '{library_name}' not found. Using first drive as fallback."
                     )
                     drive = drives[0]
-
                 drive_id = drive["id"]
                 self._log("INFO", "OK: Using drive:", drive.get("name"), drive_id)
         except Exception as e:
@@ -1368,14 +1489,12 @@ class Command(BaseCommand):
                         f"Folder check failed for '{parent_path}': {r.status_code} {r.text}"
                     )
 
-        today = datetime.date.today()
         subpath = "/".join(sharepoint_folder.split("/")[1:])
         year_folder = f"{today.year}"
         brand_folder = self.brand_folder_name(market)
         nested_subpath = f"{subpath}/{brand_folder}/{year_folder}"
 
         self._log("INFO", "Ensuring nested path (drive root-relative):", nested_subpath)
-
         try:
             if nested_subpath:
                 ensure_folder_path(drive_id, nested_subpath)
@@ -1387,8 +1506,9 @@ class Command(BaseCommand):
             upload_path = "/".join([nested_subpath, filename])
             self._log("INFO", "Uploading to path:", upload_path)
             upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
-            with open(handzettel.datei.path, "rb") as f:
-                resp = requests.put(upload_url, headers=headers, data=f)
+            # handzettel.file is in Django storage; we saved to DB; re-read from storage:
+            file_bytes = handzettel.datei.read()
+            resp = requests.put(upload_url, headers=headers, data=file_bytes)
             self._log("INFO", "PUT upload status:", resp.status_code)
 
             data = None
