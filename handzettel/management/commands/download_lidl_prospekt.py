@@ -1,7 +1,5 @@
-# This Python class downloads flyer images from websites, creates a PDF from the images, saves the PDF
-# to a model, and uploads the PDF to SharePoint using the Microsoft Graph API.
-
-import re, time, datetime, json, urllib.parse, hashlib
+# Download Rabatt-Kompass flyer pages -> PDF -> Django model -> SharePoint
+import re, time, datetime, json, urllib.parse
 from io import BytesIO
 from urllib.parse import urlparse
 
@@ -13,7 +11,6 @@ from django.core.files.base import ContentFile
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-import selenium  # for version-based quirks if ever needed
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -22,54 +19,40 @@ from selenium.webdriver.support import expected_conditions as EC
 
 from handzettel.models import Handzettel
 
-import os  # for reading environment variables
+import os
 from dotenv import load_dotenv
-import msal  # microsoft authentication library
+import msal
 
-# Load env variables for Azure credentials
 load_dotenv()
 
 
 class Command(BaseCommand):
-    help = "Download a flyer as a PDF (supports rabatt-kompass.de and lidl.de)."
+    help = "Download a flyer as a PDF (Rabatt-Kompass uniquement)."
 
-    # -------- CLI --------
     def add_arguments(self, parser):
         parser.add_argument(
             "baseurl",
             type=str,
-            help=(
-                "rabatt-kompass overview OR Lidl URL. "
-                "For Lidl include /page/1 or the base; for rabatt-kompass a viewer or overview like "
-                ".../lidl-prospekte/prospekt-<id>-0 or .../aldi-sued-prospekt is fine."
-            ),
+            help="Rabatt-Kompass overview ou viewer (ex: …/lidl-prospekte/lidl-prospekt ou …/prospekt-<id>-0).",
         )
-        parser.add_argument(
-            "pages",
-            type=int,
-            help="Maximum pages to try (auto-stops at real end).",
-        )
+        parser.add_argument("pages", type=int, help="Nombre max de pages à essayer.")
         parser.add_argument(
             "--filename-mode",
             choices=["auto", "overview", "viewer"],
             default=os.getenv("FILENAME_MODE", "auto"),
-            help=(
-                "How to build filename slug: 'auto' (default) prefer viewer id, "
-                "'overview' = last path segment of input URL, 'viewer' = force viewer id."
-            ),
         )
         parser.add_argument(
             "--rk-pick",
             choices=["current", "upcoming", "latest"],
             default=os.getenv("RK_PICK", "current"),
-            help="On RK overview pages, pick 'current' (default), 'upcoming' (Vorschau), or 'latest' uploaded id.",
+            help="Sur une page overview: choisir ‘current’ (défaut), ‘upcoming’ (Vorschau) ou ‘latest’.",
         )
 
-    # -------- tiny logger --------
+    # ----- tiny logger -----
     def _log(self, level: str, *parts):
         print(f"[{level} {time.strftime('%H:%M:%S')}]", " ".join(str(p) for p in parts))
 
-    # ---------- Chrome / Cloudflare helpers ----------
+    # ----- Chrome / CF -----
     def _configure_chrome_options(self) -> Options:
         opts = Options()
         opts.add_argument("--headless=new")
@@ -107,29 +90,22 @@ class Command(BaseCommand):
                 or ("just a moment" in title)
                 or ("cloudflare" in title)
             ):
-                self._log("DBG", "CF challenge detected; waiting…")
+                self._log("DBG", "CF challenge… wait")
                 time.sleep(2)
                 continue
             try:
                 if driver.find_elements(
                     By.ID, "challenge-stage"
                 ) or driver.find_elements(By.CSS_SELECTOR, ".cf-browser-verification"):
-                    self._log("DBG", "CF challenge DOM present; waiting…")
+                    self._log("DBG", "CF DOM… wait")
                     time.sleep(2)
                     continue
             except Exception:
                 pass
             break
 
-    # ---------- URL helpers ----------
+    # ----- URL helpers (Rabatt-Kompass only) -----
     def page_url(self, baseurl: str, n: int) -> str:
-        if "lidl.de" in baseurl:
-            if re.search(r"/page/\d+", baseurl):
-                return re.sub(r"/page/\d+", f"/page/{n}", baseurl)
-            parts = baseurl.split("?", 1)
-            path = parts[0].rstrip("/")
-            query = f"?{parts[1]}" if len(parts) == 2 else ""
-            return f"{path}/page/{n}{query}"
         if re.search(r"#page_\d+", baseurl):
             return re.sub(r"#page_\d+", f"#page_{n}", baseurl)
         return f"{baseurl}#page_{n}"
@@ -143,7 +119,7 @@ class Command(BaseCommand):
         m = re.search(r"/prospekt-(\d+)-0", url)
         return f"prospekt-{m.group(1)}-0" if m else None
 
-    # ---------- Cookies / consent / ready ----------
+    # ----- Consent / ready -----
     def accept_cookies_if_present(self, driver):
         for locator in [
             (By.ID, "onetrust-accept-btn-handler"),
@@ -161,22 +137,14 @@ class Command(BaseCommand):
                 pass
 
     def _wait_first_page_ready(self, driver):
-        if "rabatt-kompass.de" in (driver.current_url or ""):
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located(
-                        (By.CSS_SELECTOR, "img[src*='/public/gimg/']")
-                    )
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, "img[src*='/public/gimg/']")
                 )
-            except Exception:
-                pass
-        else:
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.TAG_NAME, "img"))
-                )
-            except Exception:
-                pass
+            )
+        except Exception:
+            pass
         try:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(0.5)
@@ -184,7 +152,7 @@ class Command(BaseCommand):
         except Exception:
             pass
 
-    # ---------- RK overview scoring (unchanged core) ----------
+    # ----- Overview scoring (idem) -----
     def _extract_date_range(self, blob_lower: str):
         today = datetime.date.today()
         year = today.year
@@ -350,7 +318,6 @@ class Command(BaseCommand):
         id_b, why_id = self._id_bias(href, mode)
         s += id_b
         reasons.append(why_id)
-
         return int(s), href, ", ".join(reasons)
 
     def _inspect_viewer_details(self, driver, href: str):
@@ -431,109 +398,7 @@ class Command(BaseCommand):
                 "reason": f"viewer:error {e}",
             }
 
-    # ---------- Visual selection & hashing ----------
-    def pick_image_url(self, driver) -> str | None:
-        on_rk = "rabatt-kompass.de" in (driver.current_url or "")
-        imgs = (
-            driver.execute_script(
-                """
-            const Vw = window.innerWidth, Vh = window.innerHeight;
-            function visArea(el){
-              const r = el.getBoundingClientRect();
-              const x = Math.max(0, Math.min(r.right, Vw) - Math.max(r.left, 0));
-              const y = Math.max(0, Math.min(r.bottom, Vh) - Math.max(r.top, 0));
-              return Math.floor(x*y);
-            }
-            const list = [];
-            for (const img of Array.from(document.images)) {
-                const src = img.currentSrc || img.src || '';
-                const w = img.naturalWidth || 0, h = img.naturalHeight || 0;
-                const vis = visArea(img);
-                if (src) list.push({src, w, h, vis});
-                const ss = img.getAttribute('srcset') || img.getAttribute('data-srcset');
-                if (ss) ss.split(',').forEach(part => {
-                    const u = part.trim().split(' ')[0];
-                    if (u) list.push({src: u, w, h, vis});
-                });
-                const lazy = img.getAttribute('data-src');
-                if (lazy) list.push({src: lazy, w, h, vis});
-            }
-            const els = Array.from(document.querySelectorAll('*'));
-            for (const el of els) {
-                const st = getComputedStyle(el);
-                const bg = st.backgroundImage || '';
-                const m = bg.match(/url\\(["']?(.*?)["']?\\)/);
-                if (m && m[1]) {
-                    const r = el.getBoundingClientRect();
-                    const w = Math.max(0, r.width)|0, h = Math.max(0, r.height)|0;
-                    const vis = Math.floor(Math.max(0, Math.min(r.right, Vw) - Math.max(r.left, 0)) *
-                                           Math.max(0, Math.min(r.bottom, Vh) - Math.max(r.top, 0)));
-                    list.push({src: m[1], w, h, vis});
-                }
-            }
-            return list;
-            """
-            )
-            or []
-        )
-
-        EXCLUDE = (
-            "bat.bing.com",
-            "cookielaw.org",
-            "onetrust.com",
-            "googletagmanager",
-            "google-analytics",
-            "doubleclick",
-            "facebook",
-            "hotjar",
-            "adservice",
-            "analytics",
-        )
-
-        cands = []
-        for it in imgs:
-            u = (it.get("src") or "").strip()
-            w = int(it.get("w") or 0)
-            h = int(it.get("h") or 0)
-            vis = int(it.get("vis") or 0)
-            if not u.startswith("http"):
-                continue
-            if any(b in u for b in EXCLUDE):
-                continue
-            if u.lower().endswith(".svg"):
-                continue
-
-            if on_rk:
-                if "/public/gimg/" not in u or w < 600 or h < 800:
-                    continue
-                score = vis * 5 + w * h // 20 + 800_000
-            else:
-                score = vis * 4 + w * h // 25
-                if re.search(r"\.(jpe?g|png|webp)(\?|$)", u, re.I):
-                    score += 250_000
-                if any(k in u.lower() for k in ("flyer", "page", "seiten", "prospekt")):
-                    score += 80_000
-                if any(k in u.lower() for k in ("thumb", "icon", "small")):
-                    score -= 200_000
-            cands.append((score, u, w, h, vis))
-
-        if cands:
-            cands.sort(key=lambda t: t[0], reverse=True)
-            self._log("DBG", f"Collected candidate visuals: {len(cands)}")
-            self._log("DBG", "TOP CANDIDATES:")
-            for score, src, w, h, vis in cands[:8]:
-                extra = (
-                    "rk_gimg+8e5"
-                    if "/public/gimg/" in src
-                    and "rabatt-kompass.de" in (driver.current_url or "")
-                    else ""
-                )
-                print(f"    {score:8.0f}  [img]  {src}  :: {w}x{h}, vis={vis}, {extra}")
-            chosen = cands[0][1]
-            self._log("DBG", "Chosen image URL:", chosen)
-            return chosen
-        return None
-
+    # ----- Visual capture & hashing -----
     def _capture_best_visual(self, driver) -> bytes | None:
         try:
             best, area = None, 0
@@ -570,18 +435,6 @@ class Command(BaseCommand):
         except Exception:
             pass
         try:
-            el = driver.execute_script(
-                """
-                const cs = Array.from(document.querySelectorAll('canvas'));
-                cs.sort((a,b)=>(b.width*b.height)-(a.width*a.height));
-                return cs.length ? cs[0] : null;
-                """
-            )
-            if el:
-                return el.screenshot_as_png
-        except Exception:
-            pass
-        try:
             return driver.get_screenshot_as_png()
         except Exception:
             return None
@@ -604,12 +457,10 @@ class Command(BaseCommand):
             cnt += 1
         return cnt
 
-    # ---------- RK viewer context & navigation ----------
+    # ----- Viewer context & nav -----
     def _enter_rk_viewer_frame(self, driver) -> bool:
-        """Try to switch into the rabatt-kompass viewer iframe."""
         driver.switch_to.default_content()
-        frames = driver.find_elements(By.CSS_SELECTOR, "iframe")
-        for idx, f in enumerate(frames):
+        for idx, f in enumerate(driver.find_elements(By.CSS_SELECTOR, "iframe")):
             try:
                 driver.switch_to.frame(f)
                 ok = driver.execute_script(
@@ -625,7 +476,6 @@ class Command(BaseCommand):
         return False
 
     def _switch_to_viewer_context(self, driver) -> None:
-        """Ensure we are in a context that can see the flyer image elements."""
         try:
             ok = driver.execute_script(
                 "try { return !!document.querySelector(\"img[src*='/public/gimg/']\"); } catch(e){ return false; }"
@@ -634,13 +484,11 @@ class Command(BaseCommand):
                 return
         except Exception:
             pass
-        # not found, try iframe
         self._enter_rk_viewer_frame(driver)
-        # if no iframe found, we remain at default_content (picker will still try)
 
-    def _goto_rk_page_in_context(self, driver, n: int) -> None:
-        """Navigate to page n within the current browsing context (top or frame)."""
-        # 1) Click thumbnail when available
+    def _goto_rk_page_in_context(
+        self, driver, n: int, hard_url: str | None = None
+    ) -> None:
         thumbs = driver.find_elements(By.CSS_SELECTOR, f"a[href$='#page_{n}']")
         if thumbs:
             try:
@@ -651,7 +499,6 @@ class Command(BaseCommand):
                 return
             except Exception:
                 pass
-        # 2) Change hash in-place
         try:
             driver.execute_script(
                 f"if (location.hash !== '#page_{n}') location.hash = '#page_{n}';"
@@ -662,16 +509,19 @@ class Command(BaseCommand):
             return
         except Exception:
             pass
-        # 3) Keyboard arrow (best effort)
+        if hard_url:
+            try:
+                driver.switch_to.default_content()
+                driver.get(hard_url)
+            except Exception:
+                pass
         if n > 1:
             try:
-                body = driver.find_element(By.TAG_NAME, "body")
-                body.send_keys(Keys.ARROW_RIGHT)
+                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ARROW_RIGHT)
             except Exception:
                 pass
 
     def _current_main_img_src(self, driver) -> str | None:
-        """Pick the largest visible /public/gimg/ image as the main page image."""
         best, best_area = None, 0
         for el in driver.find_elements(By.CSS_SELECTOR, "img[src*='/public/gimg/']"):
             if not el.is_displayed():
@@ -688,7 +538,7 @@ class Command(BaseCommand):
         return best
 
     def _wait_main_img_src_changed(
-        self, driver, old_src: str | None, timeout: float = 8.0
+        self, driver, old_src: str | None, timeout: float = 10.0
     ) -> str | None:
         t0 = time.time()
         while time.time() - t0 < timeout:
@@ -719,21 +569,25 @@ class Command(BaseCommand):
         s.headers["Referer"] = referer
         return s
 
-    # ---------- SharePoint helpers ----------
+    # ----- SharePoint helpers -----
     def brand_folder_name(self, market: str) -> str:
         mapping = {"lidl": "LIDL", "aldi_nord": "ALDI_NORD", "aldi_sued": "ALDI_SUED"}
         return mapping.get((market or "").lower(), "MISC")
 
-    # ---------- Main ----------
+    # ----- Main -----
     def handle(self, *args, **opts):
         baseurl = opts["baseurl"]
         pages = opts["pages"]
         filename_mode = opts.get("filename_mode", "auto")
         rk_pick_mode = opts.get("rk_pick", "current")
 
+        if "rabatt-kompass.de" not in baseurl:
+            self._log("INFO", "this command support only rabatt-kompass.de")
+            raise SystemExit(1)
+
         self._log(
             "INFO",
-            "START job baseurl=",
+            "START baseurl=",
             baseurl,
             "pages=",
             pages,
@@ -757,9 +611,9 @@ class Command(BaseCommand):
         )
         self._log("DBG", "retailer_hint:", retailer_hint)
 
-        # Resolve RK overview -> viewer
+        # ---- Resolve overview -> viewer
         resolved_slug = None
-        if "rabatt-kompass.de" in baseurl and "/prospekt-" not in baseurl:
+        if "/prospekt-" not in baseurl:
             try:
                 tmp_driver = webdriver.Chrome(options=self._configure_chrome_options())
                 self._apply_basic_stealth(tmp_driver)
@@ -784,7 +638,7 @@ class Command(BaseCommand):
                         if h and h not in seen:
                             hrefs.append(a)
                             seen.add(h)
-                    self._log("DBG", f"RK overview → found viewer links: {len(hrefs)}")
+                    self._log("DBG", f"overview → {len(hrefs)} viewer links")
                     overview_scored = []
                     for a in hrefs:
                         sc, href, why = self._score_rk_viewer_link(
@@ -799,7 +653,7 @@ class Command(BaseCommand):
                             r'https://rabatt-kompass\.de/[^"\'\s]*/prospekt-\d+-0', html
                         )
                         raw = list(dict.fromkeys(raw))
-                        self._log("DBG", f"RK overview regex → {len(raw)} candidates")
+                        self._log("DBG", f"regex → {len(raw)} candidates")
                         verified = []
                         for href in raw[:12]:
                             det = self._inspect_viewer_details(tmp_driver, href)
@@ -851,18 +705,14 @@ class Command(BaseCommand):
                         if choice:
                             baseurl = choice["href"]
                             resolved_slug = self.viewer_slug(baseurl)
-                            self._log(
-                                "INFO",
-                                "Redirecting to viewer (regex fallback):",
-                                baseurl,
-                            )
+                            self._log("INFO", "Redirect → viewer (regex):", baseurl)
                     else:
                         dump = json.dumps(
                             [[sc, href] for sc, href, _ in top],
                             indent=2,
                             ensure_ascii=False,
                         )
-                        self._log("DBG", "RK candidates (top 6):", f"\n{dump}")
+                        self._log("DBG", "candidates(top 6):\n" + dump)
                         verified = []
                         for sc, href, why in top:
                             detail = self._inspect_viewer_details(tmp_driver, href)
@@ -922,7 +772,7 @@ class Command(BaseCommand):
                             )
                             choice = verified[0]
                         best_href = choice["href"] if choice else top[0][1]
-                        self._log("INFO", "Redirecting to viewer:", best_href)
+                        self._log("INFO", "Redirect → viewer:", best_href)
                         baseurl = best_href
                         resolved_slug = self.viewer_slug(best_href)
                 finally:
@@ -930,7 +780,7 @@ class Command(BaseCommand):
             except Exception as e:
                 self._log("DBG", "overview resolver error:", e)
 
-        # Launch Chrome (main)
+        # ---- Launch Chrome (main)
         chrome_options = self._configure_chrome_options()
         chromedriver_path = os.getenv("CHROMEDRIVER", "").strip()
         try:
@@ -949,329 +799,183 @@ class Command(BaseCommand):
 
         images: list[Image.Image] = []
         slug_for_filename: str | None = None
-        found_total_pages: int | None = None
         last_fp: int | None = None
 
         try:
-            # ---- SITE SWITCH: RK vs Lidl ----
-            if "rabatt-kompass.de" in baseurl:
-                # Open viewer ONCE
-                driver.get(
-                    baseurl if "/prospekt-" in baseurl else self.page_url(baseurl, 1)
-                )
-                self._wait_cloudflare(driver)
-                self.accept_cookies_if_present(driver)
-                self._wait_first_page_ready(driver)
+            # Open viewer once
+            driver.get(
+                baseurl if "/prospekt-" in baseurl else self.page_url(baseurl, 1)
+            )
+            self._wait_cloudflare(driver)
+            self.accept_cookies_if_present(driver)
+            self._wait_first_page_ready(driver)
 
-                # enter viewer context if present
+            # Promote iframe (CI) if requested
+            if os.getenv("RK_FORCE_TOPLEVEL", "0") not in ("0", "", "false", "False"):
+                try:
+                    iframe = driver.find_element(By.CSS_SELECTOR, "iframe[src]")
+                    src = (iframe.get_attribute("src") or "").strip()
+                    if src:
+                        if not src.startswith("http"):
+                            src = urllib.parse.urljoin(
+                                driver.current_url or baseurl, src
+                            )
+                        if "#page_" not in src:
+                            src = src + ("#page_1" if "#" not in src else "")
+                        self._log("INFO", "CI mode: open iframe src directly:", src)
+                        driver.switch_to.default_content()
+                        driver.get(src)
+                        self._wait_cloudflare(driver)
+                        self._wait_first_page_ready(driver)
+                except Exception as e:
+                    self._log("DBG", "No promotable iframe:", e)
+
+            # Enter viewer context
+            self._switch_to_viewer_context(driver)
+
+            # filename slug
+            current = driver.current_url or baseurl
+            candidate_viewer = resolved_slug or self.viewer_slug(current)
+            overview_slug = self.url_slug(original_input)
+            slug_for_filename = (
+                candidate_viewer
+                if (
+                    opts.get("filename_mode") in ("auto", "viewer") and candidate_viewer
+                )
+                else overview_slug
+            )
+            self._log("INFO", "Filename slug:", slug_for_filename)
+
+            session = self._make_session_from_browser(driver, referer=current)
+            prev_src = None
+            viewer_base = re.sub(r"#page_\d+$", "", current)
+
+            for i in range(1, pages + 1):
+                self._log("INFO", f"→ Page {i}")
                 self._switch_to_viewer_context(driver)
-
-                # filename slug
-                current = driver.current_url or baseurl
-                candidate_viewer = resolved_slug or self.viewer_slug(current)
-                overview_slug = self.url_slug(original_input)
-                slug_for_filename = (
-                    candidate_viewer
-                    if filename_mode in ("auto", "viewer") and candidate_viewer
-                    else overview_slug
-                )
-                self._log(
-                    "INFO",
-                    "Using slug for filename (mode:",
-                    filename_mode,
-                    "):",
-                    slug_for_filename,
+                self._goto_rk_page_in_context(driver, i)
+                new_src = self._wait_main_img_src_changed(
+                    driver, prev_src, timeout=10.0
                 )
 
-                session = self._make_session_from_browser(
-                    driver, referer=driver.current_url or baseurl
-                )
-                prev_src = None
-
-                for i in range(1, pages + 1):
-                    self._log("INFO", f"Paging to RK page {i}")
-                    self._switch_to_viewer_context(driver)
-                    self._goto_rk_page_in_context(driver, i)
-
-                    # Wait for actual change of main image
+                if not new_src or (prev_src and new_src == prev_src):
+                    try:
+                        driver.execute_script("window.scrollBy(0, 200)")
+                        time.sleep(0.3)
+                        driver.execute_script("window.scrollBy(0, -200)")
+                    except Exception:
+                        pass
                     new_src = self._wait_main_img_src_changed(
-                        driver, prev_src, timeout=8.0
+                        driver, prev_src, timeout=4.0
                     )
 
-                    if i > 1 and (not new_src or new_src == prev_src):
-                        found_total_pages = i - 1
+                if not new_src or (prev_src and new_src == prev_src):
+                    hard = viewer_base.rstrip("#") + f"#page_{i}"
+                    self._goto_rk_page_in_context(driver, i, hard_url=hard)
+                    new_src = self._wait_main_img_src_changed(
+                        driver, prev_src, timeout=6.0
+                    )
+
+                if i > 1 and (not new_src or new_src == prev_src):
+                    self._log("INFO", f"Fin détectée à la page {i-1}.")
+                    break
+
+                if not new_src:
+                    self._log("INFO", "Pas d'image principale → fallback screenshot")
+                    png_bytes = self._capture_best_visual(driver)
+                    if not png_bytes:
+                        self._log("INFO", f"Pas de visuel à la page {i}. Stop.")
+                        break
+                    try:
+                        img = Image.open(BytesIO(png_bytes)).convert("RGB")
+                        fp = self._img_dhash(img)
+                        if (
+                            i > 1
+                            and last_fp is not None
+                            and self._ham(fp, last_fp) <= 2
+                        ):
+                            self._log("INFO", f"Identique à la page {i-1}. Stop.")
+                            break
+                        last_fp = fp
+                        images.append(img)
+                        prev_src = f"fp:{fp}"
                         self._log(
-                            "INFO",
-                            f"Reached end at page {found_total_pages}. Stopping.",
+                            "INFO", f"Page {i}: screenshot ajouté. Total {len(images)}"
                         )
+                        continue
+                    except Exception:
+                        self._log("INFO", "Screenshot illisible.")
                         break
 
-                    if not new_src:
-                        self._log(
-                            "INFO",
-                            f"No main image on page {i}; trying visual fallback…",
-                        )
-                        png_bytes = self._capture_best_visual(driver)
-                        if not png_bytes:
-                            self._log(
-                                "INFO", f"No visual content on page {i}. Stopping."
-                            )
-                            break
-                        try:
-                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
-                            fp = self._img_dhash(img)
-                            if (
-                                i > 1
-                                and last_fp is not None
-                                and self._ham(fp, last_fp) <= 2
-                            ):
-                                found_total_pages = i - 1
-                                self._log(
-                                    "INFO",
-                                    f"Visually same as page {found_total_pages}. Stopping.",
-                                )
-                                break
-                            last_fp = fp
-                            images.append(img)
-                            prev_src = f"fp:{fp}"
-                            self._log(
-                                "INFO",
-                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
-                            )
-                            continue
-                        except Exception:
-                            self._log("INFO", "Could not decode fallback visual.")
-                            break
-
-                    prev_src = new_src
-
-                    # Safer hi-res: replace trailing -{size}-{token}.ext only (won't hit the year)
-                    hi_url = (
-                        re.sub(
-                            r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
-                            r"-2000-\2.\3",
-                            new_src,
-                            flags=re.I,
-                        )
-                        or new_src
+                # Download the page image
+                prev_src = new_src
+                hi_url = (
+                    re.sub(
+                        r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
+                        r"-2000-\2.\3",
+                        new_src,
+                        flags=re.I,
                     )
-
-                    self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
-                    try:
-                        r = session.get(hi_url, timeout=20)
-                        self._log(
-                            "DBG",
-                            "GET",
-                            hi_url,
-                            "->",
-                            r.status_code,
-                            "lenHdr=",
-                            len(r.content) if r.ok else 0,
-                        )
-                        if r.status_code == 200 and r.content:
-                            try:
-                                img = Image.open(BytesIO(r.content)).convert("RGB")
-                            except Exception:
-                                img = None
-                            if img is not None:
-                                fp = self._img_dhash(img)
-                                if (
-                                    i > 1
-                                    and last_fp is not None
-                                    and self._ham(fp, last_fp) <= 2
-                                ):
-                                    found_total_pages = i - 1
-                                    self._log(
-                                        "INFO",
-                                        f"Visually same as page {found_total_pages}. Stopping.",
-                                    )
-                                    break
-                                last_fp = fp
-                                images.append(img)
-                                self._log(
-                                    "INFO",
-                                    f"Page {i}: added image. Total now {len(images)}",
-                                )
-                                continue
-                    except Exception as e:
-                        self._log("DBG", "Direct GET failed:", e)
-
-                    # Fallback screenshot in viewer
-                    self._log("INFO", "Direct download failed; trying visual fallback…")
-                    png_bytes = self._capture_best_visual(driver)
-                    if png_bytes:
+                    or new_src
+                )
+                self._log("DBG", "Image URL:", hi_url)
+                try:
+                    r = session.get(hi_url, timeout=20)
+                    self._log(
+                        "DBG",
+                        "GET",
+                        hi_url,
+                        "→",
+                        r.status_code,
+                        "len=",
+                        len(r.content) if r.ok else 0,
+                    )
+                    if r.status_code == 200 and r.content:
                         try:
-                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
+                            img = Image.open(BytesIO(r.content)).convert("RGB")
+                        except Exception:
+                            img = None
+                        if img is not None:
                             fp = self._img_dhash(img)
                             if (
                                 i > 1
                                 and last_fp is not None
                                 and self._ham(fp, last_fp) <= 2
                             ):
-                                found_total_pages = i - 1
-                                self._log(
-                                    "INFO",
-                                    f"Visually same as page {found_total_pages}. Stopping.",
-                                )
+                                self._log("INFO", f"Identique à la page {i-1}. Stop.")
                                 break
                             last_fp = fp
                             images.append(img)
                             self._log(
-                                "INFO",
-                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                                "INFO", f"Page {i}: image ajoutée. Total {len(images)}"
                             )
                             continue
-                        except Exception:
-                            self._log("INFO", "Could not decode fallback visual.")
-                            break
+                except Exception as e:
+                    self._log("DBG", "GET failed:", e)
 
-            else:
-                # LIDL.DE PATH: use /page/{n} in the top page as before
-                for i in range(1, pages + 1):
-                    url = self.page_url(baseurl, i)
-                    self._log("INFO", f"Loading page {i}:", url)
-                    driver.get(url)
-                    self._wait_cloudflare(driver)
+                # Fallback screenshot
+                self._log("INFO", "Download KO → fallback screenshot…")
+                png_bytes = self._capture_best_visual(driver)
+                if png_bytes:
                     try:
-                        driver.execute_script(
-                            "window.scrollTo(0, document.body.scrollHeight);"
+                        img = Image.open(BytesIO(png_bytes)).convert("RGB")
+                        fp = self._img_dhash(img)
+                        if (
+                            i > 1
+                            and last_fp is not None
+                            and self._ham(fp, last_fp) <= 2
+                        ):
+                            self._log("INFO", f"Identique à la page {i-1}. Stop.")
+                            break
+                        last_fp = fp
+                        images.append(img)
+                        self._log(
+                            "INFO", f"Page {i}: screenshot ajouté. Total {len(images)}"
                         )
-                        time.sleep(0.3)
-                        driver.execute_script("window.scrollTo(0, 0);")
+                        continue
                     except Exception:
-                        pass
-
-                    if i == 1:
-                        self.accept_cookies_if_present(driver)
-                        self._wait_first_page_ready(driver)
-                        current = driver.current_url or baseurl
-                        candidate_viewer = self.viewer_slug(current)
-                        overview_slug = self.url_slug(original_input)
-                        if filename_mode == "viewer":
-                            slug_for_filename = candidate_viewer or overview_slug
-                        elif filename_mode == "overview":
-                            slug_for_filename = overview_slug
-                        else:
-                            slug_for_filename = candidate_viewer or overview_slug
-                        self._log(
-                            "INFO",
-                            "Using slug for filename (mode:",
-                            filename_mode,
-                            "):",
-                            slug_for_filename,
-                        )
-
-                    try:
-                        WebDriverWait(driver, 8).until(
-                            EC.presence_of_element_located((By.TAG_NAME, "img"))
-                        )
-                    except Exception:
-                        pass
-
-                    img_url = self.pick_image_url(driver)
-                    if not img_url:
-                        self._log(
-                            "INFO", "No direct image URL; trying visual fallback…"
-                        )
-                        png_bytes = self._capture_best_visual(driver)
-                        if not png_bytes:
-                            self._log(
-                                "INFO",
-                                f"No visual content captured on page {i}. Stopping here.",
-                            )
-                            break
-                        try:
-                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
-                            fp = self._img_dhash(img)
-                            if (
-                                i > 1
-                                and last_fp is not None
-                                and self._ham(fp, last_fp) <= 2
-                            ):
-                                found_total_pages = i - 1
-                                self._log(
-                                    "INFO",
-                                    f"Visually same as page {found_total_pages}. Stopping.",
-                                )
-                                break
-                            last_fp = fp
-                            images.append(img)
-                            self._log(
-                                "INFO",
-                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
-                            )
-                            continue
-                        except Exception:
-                            self._log("INFO", "Could not decode fallback visual.")
-                            break
-
-                    self._log("DBG", "Chosen (possibly hi-res) image:", img_url)
-                    try:
-                        r = requests.get(img_url, timeout=20)
-                        self._log(
-                            "DBG",
-                            "GET",
-                            img_url,
-                            "->",
-                            r.status_code,
-                            "lenHdr=",
-                            len(r.content) if r.ok else 0,
-                        )
-                        if r.status_code == 200 and r.content:
-                            try:
-                                img = Image.open(BytesIO(r.content)).convert("RGB")
-                            except Exception:
-                                img = None
-                            if img is not None:
-                                fp = self._img_dhash(img)
-                                if (
-                                    i > 1
-                                    and last_fp is not None
-                                    and self._ham(fp, last_fp) <= 2
-                                ):
-                                    found_total_pages = i - 1
-                                    self._log(
-                                        "INFO",
-                                        f"Visually same as page {found_total_pages}. Stopping.",
-                                    )
-                                    break
-                                last_fp = fp
-                                images.append(img)
-                                self._log(
-                                    "INFO",
-                                    f"Page {i}: added image. Total now {len(images)}",
-                                )
-                                continue
-                    except Exception as e:
-                        self._log("DBG", "Direct GET failed:", e)
-
-                    self._log("INFO", "Direct download failed; trying visual fallback…")
-                    png_bytes = self._capture_best_visual(driver)
-                    if png_bytes:
-                        try:
-                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
-                            fp = self._img_dhash(img)
-                            if (
-                                i > 1
-                                and last_fp is not None
-                                and self._ham(fp, last_fp) <= 2
-                            ):
-                                found_total_pages = i - 1
-                                self._log(
-                                    "INFO",
-                                    f"Visually same as page {found_total_pages}. Stopping.",
-                                )
-                                break
-                            last_fp = fp
-                            images.append(img)
-                            self._log(
-                                "INFO",
-                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
-                            )
-                            continue
-                        except Exception:
-                            self._log("INFO", "Could not decode fallback visual.")
-                            break
+                        self._log("INFO", "Screenshot illisible.")
+                        break
         finally:
             try:
                 driver.quit()
@@ -1280,16 +984,16 @@ class Command(BaseCommand):
                 pass
 
         if not images:
-            self._log("INFO", "No page images found!")
+            self._log("INFO", "Aucune page trouvée.")
             return
 
-        # Build PDF
+        # ---- Build PDF
         pdf = BytesIO()
         images[0].save(pdf, format="PDF", save_all=True, append_images=images[1:])
         pdf.seek(0)
-        self._log("INFO", f"PDF built with {len(images)} pages.")
+        self._log("INFO", f"PDF construit ({len(images)} pages).")
 
-        # Save model
+        # ---- Save model
         u = original_input.lower() if original_input else baseurl.lower()
         market = (
             "lidl"
@@ -1311,7 +1015,6 @@ class Command(BaseCommand):
         today = datetime.date.today()
         iso_week = today.isocalendar()[1]
         slug = slug_for_filename or self.url_slug(baseurl)
-        brand_folder = self.brand_folder_name(market)
         filename_prefix = {
             "lidl": "LidlProspekt",
             "aldi_nord": "AldiNordProspekt",
@@ -1319,36 +1022,22 @@ class Command(BaseCommand):
             "kaufland": "KauflandProspekt",
             "edeka": "EdekaProspekt",
         }.get(market, "Prospekt")
-
         filename = f"{filename_prefix}_KW{iso_week:02d}.pdf"
         title = f"{market.replace('_',' ').upper()} – {slug} – {today:%Y-%m-%d}"
-        self._log(
-            "DBG", f"Model filename: {filename} | title: {title} | market: {market}"
-        )
+
         handzettel = Handzettel(supermarkt=market, titel=title)
         handzettel.datei.save(filename, ContentFile(pdf.read()))
         handzettel.save()
-        self._log("INFO", f"PDF saved to model as '{filename}'.")
+        self._log("INFO", f"PDF sauvegardé dans le modèle: {filename}")
 
-        # ------------- SharePoint upload -------------
-        self._log("INFO", "Uploading PDF to SharePoint…")
-
+        # ---- SharePoint upload
+        self._log("INFO", "Upload vers SharePoint…")
         client_id = os.getenv("AZURE_CLIENT_ID")
         client_secret = os.getenv("AZURE_CLIENT_SECRET")
         tenant_id = os.getenv("AZURE_TENANT_ID")
         sharepoint_site = os.getenv("SHAREPOINT_SITE")
         sharepoint_folder = os.getenv("SHAREPOINT_FOLDER")
         sharepoint_drive_id = os.getenv("SHAREPOINT_DRIVE_ID")
-
-        self._log(
-            "DBG",
-            "SITE=",
-            sharepoint_site,
-            " | FOLDER=",
-            sharepoint_folder,
-            " | DRIVE_ID=",
-            sharepoint_drive_id or "(auto)",
-        )
 
         def die(msg, *extra):
             print("ERROR", msg, *extra)
@@ -1376,7 +1065,7 @@ class Command(BaseCommand):
                 )
             token = token_result["access_token"]
             headers = {"Authorization": f"Bearer {token}"}
-            self._log("INFO", "OK: Got access token")
+            self._log("INFO", "OK: access token")
         except Exception as e:
             return die("MSAL token error", e)
 
@@ -1385,18 +1074,12 @@ class Command(BaseCommand):
                 f"https://graph.microsoft.com/v1.0/sites/{sharepoint_site}",
                 headers=headers,
             )
-            self._log("DBG", "GET site status:", site_info.status_code)
             if site_info.status_code != 200:
-                print("GET site body:", site_info.text[:800])
-                return die(
-                    "cannot read site.Check sharepoint site and permissions",
-                    site_info.text,
-                )
-            site_json = site_info.json()
-            site_id = site_json.get("id")
-            self._log("INFO", "OK site id =", site_id)
+                return die("cannot read site. Check site & permissions", site_info.text)
+            site_id = site_info.json().get("id")
             if not site_id:
-                return die("site ID missing in response", site_json)
+                return die("site ID missing")
+            self._log("INFO", "Site id =", site_id)
         except Exception as e:
             return die("site lookup failed", e)
 
@@ -1406,26 +1089,17 @@ class Command(BaseCommand):
         try:
             if sharepoint_drive_id:
                 drive_id = sharepoint_drive_id.strip()
-                self._log("INFO", "OK: Using drive by ID:", drive_id)
+                self._log("INFO", "Using drive by ID:", drive_id)
             else:
                 drives_resp = requests.get(
                     f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives",
                     headers=headers,
                 )
-                self._log("DBG", "GET drives status:", drives_resp.status_code)
                 if drives_resp.status_code != 200:
-                    return die(
-                        "cannot list drives. Permissions missing!", drives_resp.text
-                    )
+                    return die("cannot list drives", drives_resp.text)
                 drives = drives_resp.json().get("value", [])
-                self._log(
-                    "DBG",
-                    "Available drives:",
-                    [(d.get("name"), d.get("id")) for d in drives],
-                )
                 if not drives:
-                    return die("No drives found on the site.")
-
+                    return die("No drives on site")
                 library_name = sharepoint_folder.split("/")[0].strip()
                 drive = (
                     next((d for d in drives if d.get("name") == library_name), None)
@@ -1445,14 +1119,9 @@ class Command(BaseCommand):
                         ),
                         None,
                     )
-                )
-                if not drive:
-                    print(
-                        f"WARN: Library '{library_name}' not found. Using first drive as fallback."
-                    )
-                    drive = drives[0]
+                ) or drives[0]
                 drive_id = drive["id"]
-                self._log("INFO", "OK: Using drive:", drive.get("name"), drive_id)
+                self._log("INFO", "Using drive:", drive.get("name"), drive_id)
         except Exception as e:
             return die("Drive lookup failed", e)
 
@@ -1465,7 +1134,6 @@ class Command(BaseCommand):
                     f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{parent_path}",
                     headers=headers,
                 )
-                self._log("DBG", "Check folder", parent_path, "->", r.status_code)
                 if r.status_code == 404:
                     parent_parent = (
                         f"/{parent_path.rsplit('/',1)[0]}" if "/" in parent_path else ""
@@ -1482,7 +1150,7 @@ class Command(BaseCommand):
                     )
                     if cr.status_code not in (200, 201):
                         raise RuntimeError(
-                            f"Failed to create '{part}': {cr.status_code} {cr.text}"
+                            f"create '{part}' failed: {cr.status_code} {cr.text}"
                         )
                 elif r.status_code != 200:
                     raise RuntimeError(
@@ -1494,62 +1162,45 @@ class Command(BaseCommand):
         brand_folder = self.brand_folder_name(market)
         nested_subpath = f"{subpath}/{brand_folder}/{year_folder}"
 
-        self._log("INFO", "Ensuring nested path (drive root-relative):", nested_subpath)
         try:
             if nested_subpath:
                 ensure_folder_path(drive_id, nested_subpath)
-                self._log("INFO", "OK: Folder path ensured:", nested_subpath)
         except Exception as e:
             return die("Creating/checking folder path failed", e)
 
         try:
             upload_path = "/".join([nested_subpath, filename])
-            self._log("INFO", "Uploading to path:", upload_path)
             upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
-            # handzettel.file is in Django storage; we saved to DB; re-read from storage:
             file_bytes = handzettel.datei.read()
             resp = requests.put(upload_url, headers=headers, data=file_bytes)
-            self._log("INFO", "PUT upload status:", resp.status_code)
-
-            data = None
+            if resp.status_code not in (200, 201):
+                return die(
+                    "Upload error",
+                    resp.status_code,
+                    resp.text[:400] if resp.text else "",
+                )
+            # optional: fetch webUrl
             try:
-                data = resp.json()
+                weburl = resp.json().get("webUrl")
             except Exception:
-                pass
-
-            if resp.status_code in (200, 201):
-                weburl = (data or {}).get("webUrl")
-                if not weburl:
-                    meta = requests.get(
-                        f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}",
-                        headers=headers,
-                    )
-                    if meta.status_code == 200:
-                        weburl = meta.json().get("webUrl")
-                self._log("INFO", "SharePoint webUrl:", weburl or "(not returned)")
-                self._log("INFO", "PDF successfully uploaded to SharePoint!")
-            else:
-                print("Response body (truncated):", (resp.text or "")[:500])
-                return die("Error uploading to SharePoint:", resp.status_code)
+                weburl = None
+            self._log("INFO", "Uploaded to:", weburl or upload_path)
         except Exception as e:
             return die("Upload exception", e)
 
-        def search_in_drive(name: str):
-            try:
-                q = urllib.parse.quote(name)
-                r = requests.get(
-                    f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{q}')",
-                    headers=headers,
-                )
-                if r.status_code == 200:
-                    hits = r.json().get("value", [])
-                    self._log("INFO", f"Search hits for '{name}':", len(hits))
-                    for it in hits[:5]:
-                        print("-", it.get("name"), "| webUrl:", it.get("webUrl"))
-                else:
-                    print("Search failed:", r.status_code, r.text[:400])
-            except Exception as e:
-                print("Search exception:", e)
+        # quick search (debug)
+        try:
+            q = urllib.parse.quote(filename)
+            r = requests.get(
+                f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{q}')",
+                headers=headers,
+            )
+            if r.status_code == 200:
+                hits = r.json().get("value", [])
+                self._log("INFO", f"Search hits '{filename}':", len(hits))
+                for it in hits[:5]:
+                    print("-", it.get("name"), "| webUrl:", it.get("webUrl"))
+        except Exception:
+            pass
 
-        search_in_drive(filename)
         self._log("INFO", "DONE.")
