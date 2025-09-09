@@ -2,7 +2,7 @@ name: Weekly flyer → SharePoint
 
 on:
   schedule:
-    - cron: "7 5 * * 1" # undi 05:07 UTC
+    - cron: "7 5 * * 1"
   workflow_dispatch: {}
 
 jobs:
@@ -29,6 +29,7 @@ jobs:
       # Rabatt-Kompass
       RK_PICK: current
       RK_FORCE_TOPLEVEL: "1"
+      FORCE_SCREENSHOT: "1"
       PYTHONUNBUFFERED: "1"
       TZ: Europe/Berlin
 
@@ -60,6 +61,14 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Install system deps (fonts, nss, gbm)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libnss3 libgbm1 libasound2 \
+            fonts-liberation ttf-freefont fonts-noto-color-emoji
+          sudo rm -rf /var/lib/apt/lists/*
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
@@ -75,7 +84,15 @@ jobs:
       - name: Preflight
         run: |
           python --version
+          python - <<'PY'
+          import selenium, PIL, sys
+          print("selenium", selenium.__version__)
+          import PIL; print("Pillow", PIL.__version__)
+          PY
           google-chrome --version || true
+
+      - name: Install xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
 
       - name: Run Django command (with retries)
         shell: bash
@@ -83,6 +100,7 @@ jobs:
           set -euo pipefail
           for i in 1 2 3; do
             echo "Attempt $i: ${{ matrix.flyer.url }} pages=${{ matrix.flyer.pages }}"
+            # si tu as installé xvfb, tu peux préfixer par: xvfb-run -a
             if python manage.py download_lidl_prospekt "${{ matrix.flyer.url }}" ${{ matrix.flyer.pages }}; then
               echo "Success on attempt $i"; exit 0
             fi

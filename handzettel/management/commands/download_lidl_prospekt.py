@@ -78,6 +78,7 @@ class Command(BaseCommand):
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--user-data-dir=/tmp/chrome-profile")
         ua = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -948,6 +949,9 @@ class Command(BaseCommand):
         self._apply_basic_stealth(driver)
 
         images: list[Image.Image] = []
+        force_screenshot = (os.getenv("CI", "").lower() == "true") or (
+            os.getenv("FORCE_SCREENSHOT", "0") == "1"
+        )
         slug_for_filename: str | None = None
         found_total_pages: int | None = None
         last_fp: int | None = None
@@ -987,16 +991,20 @@ class Command(BaseCommand):
                     driver, referer=driver.current_url or baseurl
                 )
                 prev_src = None
-
+                viewer_base = (driver.current_url or baseurl).split("#", 1)[0]
                 for i in range(1, pages + 1):
-                    self._log("INFO", f"Paging to RK page {i}")
+                    target = f"{viewer_base}#page_{i}"
+                    self._log("INFO", f"Loading RK page {i}: {target}")
+                    driver.get(target)
+                    self._wait_cloudflare(driver)
                     self._switch_to_viewer_context(driver)
-                    self._goto_rk_page_in_context(driver, i)
-
-                    # Wait for actual change of main image
-                    new_src = self._wait_main_img_src_changed(
-                        driver, prev_src, timeout=8.0
-                    )
+                    try:
+                        WebDriverWait(driver, 12).until(
+                            lambda d: self._current_main_img_src(d) is not None
+                        )
+                    except Exception:
+                        pass
+                    new_src = self._current_main_img_src(driver)
 
                     if i > 1 and (not new_src or new_src == prev_src):
                         found_total_pages = i - 1
@@ -1055,10 +1063,20 @@ class Command(BaseCommand):
                         )
                         or new_src
                     )
+                    if force_screenshot:
+                        self._log(
+                            "INFO",
+                            "CI mode: skipping direct GET; using visual fallback (screenshot).",
+                        )
+                        r = None
+                    else:
+                        self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
+                        try:
+                            r = session.get(hi_url, timeout=20)
+                        except Exception as e:
+                            self._log("DBG", "Direct GET failed:", e)
+                            r = None
 
-                    self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
-                    try:
-                        r = session.get(hi_url, timeout=20)
                         self._log(
                             "DBG",
                             "GET",
@@ -1068,7 +1086,11 @@ class Command(BaseCommand):
                             "lenHdr=",
                             len(r.content) if r.ok else 0,
                         )
-                        if r.status_code == 200 and r.content:
+                        if (
+                            r is not None
+                            and getattr(r, "status_code", 0) == 200
+                            and r.content
+                        ):
                             try:
                                 img = Image.open(BytesIO(r.content)).convert("RGB")
                             except Exception:
@@ -1093,8 +1115,6 @@ class Command(BaseCommand):
                                     f"Page {i}: added image. Total now {len(images)}",
                                 )
                                 continue
-                    except Exception as e:
-                        self._log("DBG", "Direct GET failed:", e)
 
                     # Fallback screenshot in viewer
                     self._log("INFO", "Direct download failed; trying visual fallback…")
