@@ -10,10 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.flyer.url }}
-      cancel-in-progress: true
-
     env:
       DJANGO_SETTINGS_MODULE: prospektprojekt.settings
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
