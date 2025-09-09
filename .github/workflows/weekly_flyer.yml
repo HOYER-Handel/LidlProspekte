@@ -69,6 +69,14 @@ jobs:
             fonts-liberation ttf-freefont fonts-noto-color-emoji
           sudo rm -rf /var/lib/apt/lists/*
 
+      - name: Install system deps (fonts, nss, gbm)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libnss3 libgbm1 libasound2 \
+            fonts-liberation ttf-freefont fonts-noto-color-emoji
+          sudo rm -rf /var/lib/apt/lists/*
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
@@ -98,21 +106,39 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          set -x
           for i in 1 2 3; do
             echo "Attempt $i: ${{ matrix.flyer.url }} pages=${{ matrix.flyer.pages }}"
-            # si tu as installé xvfb, tu peux préfixer par: xvfb-run -a
-            if python manage.py download_lidl_prospekt "${{ matrix.flyer.url }}" ${{ matrix.flyer.pages }}; then
+            if python manage.py download_lidl_prospekt "${{ matrix.flyer.url }}" ${{ matrix.flyer.pages }} 2>&1 | tee -a run_${{ matrix.flyer.pages }}.log; then
               echo "Success on attempt $i"; exit 0
             fi
             echo "Attempt $i failed"; sleep 10
           done
           exit 1
 
-      - name: Upload debug artifacts on failure
-        if: failure()
+      - name: Selenium smoke test
+        run: |
+          python - <<'PY'
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          o = Options()
+          o.add_argument("--headless=new")
+          o.add_argument("--no-sandbox")
+          o.add_argument("--disable-dev-shm-usage")
+          o.add_argument("--window-size=1920,1080")
+          o.add_argument("--user-data-dir=/tmp/chrome-profile")
+          d = webdriver.Chrome(options=o)
+          d.get("https://example.com")
+          print("TITLE:", d.title)
+          d.quit()
+          PY
+
+      - name: Upload debug artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-logs-${{ matrix.flyer.pages }}
+          name: debug-${{ matrix.flyer.pages }}
           path: |
             *.log
             debug_*.png
+          if-no-files-found: ignore
