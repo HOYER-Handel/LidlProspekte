@@ -667,6 +667,43 @@ class Command(BaseCommand):
             cnt += 1
         return cnt
 
+    def _enter_rk_viewer_frame(self, driver) -> bool:
+        driver.switch_to.default_content()
+        for f in driver.find_elements(By.CSS_SELECTOR, "iframe"):
+            try:
+                driver.switch_to.frame(f)
+                ok = driver.execute_script(
+                    "return !!document.querySelector(\"img[src*='/public/gimg/'], a[href*='#page_']\");"
+                )
+                if ok:
+                    return True
+            except Exception:
+                pass
+            finally:
+                driver.switch_to.default_content()
+        return False
+
+    def _switch_to_viewer_context(self, driver) -> None:
+        try:
+            ok = driver.execute_script(
+                "try { return !!document.querySelector(\"img[src*='/public/gimg/']\"); } catch(e){ return false; }"
+            )
+            if ok:
+                return
+        except Exception:
+            pass
+        self._enter_rk_viewer_frame(driver)
+
+    def _img_dhash(self, img: Image.Image) -> int:
+        small = img.convert("L").resize((9, 8), Image.LANCZOS)
+        px = list(small.getdata())
+        bits = 0
+        for r in range(8):
+            row = r * 9
+            for c in range(8):
+                bits = (bits << 1) | (1 if px[row + c] > px[row + c + 1] else 0)
+        return bits
+
     #####
 
     # --- Download one image from a URL and return it as a PIL Image.--
@@ -959,146 +996,212 @@ class Command(BaseCommand):
 
         # loop through pages
         try:
-            for i in range(1, pages + 1):
-                url = self.page_url(baseurl, i)
-                self._log("INFO", f"Loading page {i}:", url)
-                driver.get(url)
+            if "rabatt-kompass.de" in baseurl:
+                # --- RK viewer:open when #page_{n} ---
+                driver.get(
+                    baseurl if "/prospekt-" in baseurl else self.page_url(baseurl, 1)
+                )
                 self._wait_cloudflare(driver)
-                self._log("DBG", "current_url after GET:", driver.current_url or url)
+                self.accept_cookies_if_present(driver)
+                self._wait_first_page_ready(driver)
 
-                if i == 1:
-                    self.accept_cookies_if_present(driver)
-                    self._wait_first_page_ready(driver)
+                self._switch_to_viewer_context(driver)
 
-                    current = driver.current_url or baseurl
-                    candidate_viewer = resolved_slug or self.viewer_slug(current)
-                    overview_slug = self.url_slug(original_input)
-                    if filename_mode == "viewer":
-                        slug_for_filename = candidate_viewer or overview_slug
-                    elif filename_mode == "overview":
-                        slug_for_filename = overview_slug
-                    else:
-                        slug_for_filename = candidate_viewer or overview_slug
-                    self._log(
-                        "INFO",
-                        "Using slug for filename (mode:",
-                        filename_mode,
-                        "):",
-                        slug_for_filename,
-                    )
+                viewer_base = (driver.current_url or baseurl).split("#", 1)[0]
+                last_fp = None
 
-                try:
-                    WebDriverWait(driver, 8).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "img"))
-                    )
-                except Exception:
-                    pass
-                time.sleep(1.0)
-
-                img_url = self.pick_image_url(driver)
-
-                if not img_url and i == 1:
-                    self._log("INFO", "No image on page 1 yet; retrying…")
-                    time.sleep(1.0)
-                    driver.get(url)
+                for i in range(1, pages + 1):
+                    target = f"{viewer_base}#page_{i}"
+                    self._log("INFO", f"[RK] go page {i}: {target}")
+                    driver.get(target)
                     self._wait_cloudflare(driver)
-                    self._wait_first_page_ready(driver)
+                    self._switch_to_viewer_context(driver)
+
+                    try:
+                        WebDriverWait(driver, 12).until(
+                            lambda d: d.execute_script(
+                                "return !!document.querySelector(\"img[src*='/public/gimg/']\");"
+                            )
+                        )
+                    except Exception:
+                        pass
+
                     img_url = self.pick_image_url(driver)
 
-                if not img_url:
-                    if i > 1:
-                        self._log(
-                            "INFO",
-                            f"No image found on page {i}. Reached end at page {i-1}. Stopping.",
-                        )
-                        break
-                    else:
-                        self._log(
-                            "INFO", "No image on page 1. Will try fallback later."
-                        )
-
-                if i > 1 and prev_img_url and img_url == prev_img_url:
-                    self._log(
-                        "INFO",
-                        f"Same image URL as previous page. Reached end at page {i-1}. Stopping.",
-                    )
-                    break
-                prev_img_url = img_url
-
-                hi_url = (
-                    re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
-                    if "/public/gimg/" in img_url
-                    else img_url
-                )
-                self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
-
-                try:
-                    r = requests.get(hi_url, timeout=20)
-                    self._log(
-                        "DBG",
-                        "GET",
-                        hi_url,
-                        "->",
-                        r.status_code,
-                        "lenHdr=",
-                        len(r.content) if r.ok else 0,
-                    )
-                    if r.status_code == 200 and r.content:
-                        img = Image.open(BytesIO(r.content)).convert("RGB")
-                        fp = self._img_dhash(img)
-                        if (
-                            i > 1
-                            and last_fp is not None
-                            and self._ham(fp, last_fp) <= 2
-                        ):
-                            self._log("INFO", f"Visually same as page {i-1}. Stopping.")
+                    if not img_url:
+                        self._log("INFO", "No direct image; trying screenshot…")
+                        png = self._capture_best_visual(driver)
+                        if not png:
+                            if i > 1:
+                                self._log(
+                                    "INFO", f"Reached end at page {i-1}. Stopping."
+                                )
+                                break
+                            self._log("INFO", "No visual on page 1. Stopping.")
                             break
-                        last_fp = fp
+                        try:
+                            img = Image.open(BytesIO(png)).convert("RGB")
+                        except Exception:
+                            self._log("INFO", "Screenshot decode failed.")
+                            break
+                    else:
 
-                        images.append(img)
-
-                        import hashlib
-
-                        md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
-                        self._log(
-                            "DBG", "Downloaded bytes:", len(r.content), "md5=", md5
+                        hi_url = (
+                            re.sub(
+                                r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
+                                r"-2000-\2.\3",
+                                img_url,
+                                flags=re.I,
+                            )
+                            if "/public/gimg/" in img_url
+                            else img_url
                         )
-                        self._log(
-                            "INFO", f"Page {i}: added image. Total now {len(images)}"
-                        )
-                        continue
-                except Exception as e:
-                    self._log("DBG", "Direct GET failed:", e)
 
-                self._log("INFO", "Direct download failed; trying visual fallback…")
-                png_bytes = self._capture_best_visual(driver)
-                if png_bytes:
-                    try:
-                        img = Image.open(BytesIO(png_bytes)).convert("RGB")
-                        fp = self._img_dhash(img)
-                        if (
-                            i > 1
-                            and last_fp is not None
-                            and self._ham(fp, last_fp) <= 2
-                        ):
+                        img = None
+                        try:
+                            r = requests.get(hi_url, timeout=20)
+                            if r.status_code == 200 and r.content:
+                                img = Image.open(BytesIO(r.content)).convert("RGB")
+                        except Exception as e:
+                            self._log("DBG", "Direct GET failed:", e)
+
+                        if img is None:
                             self._log(
                                 "INFO",
-                                f"Visually same as page {i-1} (screenshot). Stopping.",
+                                "Direct download failed; using screenshot fallback…",
                             )
-                            break
-                        last_fp = fp
+                            png = self._capture_best_visual(driver)
+                            if not png:
+                                if i > 1:
+                                    self._log(
+                                        "INFO", f"Reached end at page {i-1}. Stopping."
+                                    )
+                                    break
+                                self._log("INFO", "No visual on page 1. Stopping.")
+                                break
+                            try:
+                                img = Image.open(BytesIO(png)).convert("RGB")
+                            except Exception:
+                                self._log("INFO", "Screenshot decode failed.")
+                                break
 
-                        images.append(img)
+                    fp = self._img_dhash(img)
+                    if i > 1 and last_fp is not None and self._ham(fp, last_fp) <= 2:
+                        self._log("INFO", f"Visually same as page {i-1}. Stopping.")
+                        break
+                    last_fp = fp
+
+                    images.append(img)
+                    self._log("INFO", f"Page {i}: added. Total now {len(images)}")
+
+            else:
+
+                for i in range(1, pages + 1):
+                    url = self.page_url(baseurl, i)
+                    self._log("INFO", f"Loading page {i}:", url)
+                    driver.get(url)
+                    self._wait_cloudflare(driver)
+                    self._log(
+                        "DBG", "current_url after GET:", driver.current_url or url
+                    )
+
+                    if i == 1:
+                        self.accept_cookies_if_present(driver)
+                        self._wait_first_page_ready(driver)
+
+                        current = driver.current_url or baseurl
+                        candidate_viewer = resolved_slug or self.viewer_slug(current)
+                        overview_slug = self.url_slug(original_input)
+                        if filename_mode == "viewer":
+                            slug_for_filename = candidate_viewer or overview_slug
+                        elif filename_mode == "overview":
+                            slug_for_filename = overview_slug
+                        else:
+                            slug_for_filename = candidate_viewer or overview_slug
                         self._log(
                             "INFO",
-                            f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                            "Using slug for filename (mode:",
+                            filename_mode,
+                            "):",
+                            slug_for_filename,
                         )
 
+                    try:
+                        WebDriverWait(driver, 8).until(
+                            EC.presence_of_element_located((By.TAG_NAME, "img"))
+                        )
                     except Exception:
-                        self._log("INFO", "Could not decode fallback visual.")
-                else:
-                    self._log("INFO", "No visual content captured on this page.")
+                        pass
+                    time.sleep(1.0)
+
+                    img_url = self.pick_image_url(driver)
+
+                    if not img_url and i == 1:
+                        self._log("INFO", "No image on page 1 yet; retrying…")
+                        time.sleep(1.0)
+                        driver.get(url)
+                        self._wait_cloudflare(driver)
+                        self._wait_first_page_ready(driver)
+                        img_url = self.pick_image_url(driver)
+
+                    if not img_url:
+                        self._log("INFO", "No image found on this page.")
+                        continue
+
+                    hi_url = (
+                        re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
+                        if "/public/gimg/" in img_url
+                        else img_url
+                    )
+                    self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
+
+                    try:
+                        r = requests.get(hi_url, timeout=20)
+                        self._log(
+                            "DBG",
+                            "GET",
+                            hi_url,
+                            "->",
+                            r.status_code,
+                            "lenHdr=",
+                            len(r.content) if r.ok else 0,
+                        )
+                        if r.status_code == 200 and r.content:
+                            images.append(Image.open(BytesIO(r.content)).convert("RGB"))
+                            import hashlib
+
+                            md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
+                            self._log(
+                                "DBG", "Downloaded bytes:", len(r.content), "md5=", md5
+                            )
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added image. Total now {len(images)}",
+                            )
+                            continue
+                    except Exception as e:
+                        self._log("DBG", "Direct GET failed:", e)
+
+                    self._log("INFO", "Direct download failed; trying visual fallback…")
+                    png_bytes = self._capture_best_visual(driver)
+                    if png_bytes:
+                        try:
+                            images.append(Image.open(BytesIO(png_bytes)).convert("RGB"))
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                            )
+                        except Exception:
+                            self._log("INFO", "Could not decode fallback visual.")
+                    else:
+                        self._log("INFO", "No visual content captured on this page.")
         finally:
+            try:
+                driver.quit()
+                self._log("DBG", "Chrome closed.")
+            except Exception:
+                pass
+
             try:
                 driver.quit()
                 self._log("DBG", "Chrome closed.")
