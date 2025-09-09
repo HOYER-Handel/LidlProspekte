@@ -2,17 +2,17 @@ name: Weekly flyer → SharePoint
 
 on:
   schedule:
-    - cron: "7 5 * * 1" # Every Monday at 05:07 UTC
+    - cron: "7 5 * * 1" # undi 05:07 UTC
   workflow_dispatch: {}
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.flyer.url }}
+      cancel-in-progress: true
 
     env:
       DJANGO_SETTINGS_MODULE: prospektprojekt.settings
@@ -26,9 +26,9 @@ jobs:
       SHAREPOINT_SITE: ${{ secrets.SHAREPOINT_SITE }}
       SHAREPOINT_FOLDER: ${{ secrets.SHAREPOINT_FOLDER }}
 
-      # Scraper behaviour
+      # Rabatt-Kompass
       RK_PICK: current
-      RK_FORCE_TOPLEVEL: "1" # <- open viewer iframe directly in CI (fixes single-page issue)
+      RK_FORCE_TOPLEVEL: "1"
       PYTHONUNBUFFERED: "1"
       TZ: Europe/Berlin
 
@@ -60,14 +60,13 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install Python dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # Pin selenium to a recent version with Selenium Manager
-            pip install django requests pillow selenium==4.23.1 python-dotenv msal
+            pip install django requests pillow selenium python-dotenv msal
           fi
 
       - name: Setup Google Chrome (stable)
@@ -85,8 +84,7 @@ jobs:
           for i in 1 2 3; do
             echo "Attempt $i: ${{ matrix.flyer.url }} pages=${{ matrix.flyer.pages }}"
             if python manage.py download_lidl_prospekt "${{ matrix.flyer.url }}" ${{ matrix.flyer.pages }}; then
-              echo "Success on attempt $i"
-              exit 0
+              echo "Success on attempt $i"; exit 0
             fi
             echo "Attempt $i failed"; sleep 10
           done
