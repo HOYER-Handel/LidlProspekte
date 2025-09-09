@@ -648,6 +648,27 @@ class Command(BaseCommand):
         except Exception:
             return None
 
+    #####
+    def _img_dhash(self, img: Image.Image) -> int:
+        small = img.convert("L").resize((9, 8), Image.LANCZOS)
+        px = list(small.getdata())
+        bits = 0
+        for r in range(8):
+            row = r * 9
+            for c in range(8):
+                bits = (bits << 1) | (1 if px[row + c] > px[row + c + 1] else 0)
+        return bits
+
+    def _ham(self, a: int, b: int) -> int:
+        x = a ^ b
+        cnt = 0
+        while x:
+            x &= x - 1
+            cnt += 1
+        return cnt
+
+    #####
+
     # --- Download one image from a URL and return it as a PIL Image.--
     def fetch_image(self, url: str) -> Image.Image | None:
         try:
@@ -933,6 +954,8 @@ class Command(BaseCommand):
 
         images: list[Image.Image] = []
         slug_for_filename: str | None = None
+        prev_img_url = None
+        last_fp = None
 
         # loop through pages
         try:
@@ -983,8 +1006,24 @@ class Command(BaseCommand):
                     img_url = self.pick_image_url(driver)
 
                 if not img_url:
-                    self._log("INFO", "No image found on this page.")
-                    continue
+                    if i > 1:
+                        self._log(
+                            "INFO",
+                            f"No image found on page {i}. Reached end at page {i-1}. Stopping.",
+                        )
+                        break
+                    else:
+                        self._log(
+                            "INFO", "No image on page 1. Will try fallback later."
+                        )
+
+                if i > 1 and prev_img_url and img_url == prev_img_url:
+                    self._log(
+                        "INFO",
+                        f"Same image URL as previous page. Reached end at page {i-1}. Stopping.",
+                    )
+                    break
+                prev_img_url = img_url
 
                 hi_url = (
                     re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
@@ -1005,7 +1044,19 @@ class Command(BaseCommand):
                         len(r.content) if r.ok else 0,
                     )
                     if r.status_code == 200 and r.content:
-                        images.append(Image.open(BytesIO(r.content)).convert("RGB"))
+                        img = Image.open(BytesIO(r.content)).convert("RGB")
+                        fp = self._img_dhash(img)
+                        if (
+                            i > 1
+                            and last_fp is not None
+                            and self._ham(fp, last_fp) <= 2
+                        ):
+                            self._log("INFO", f"Visually same as page {i-1}. Stopping.")
+                            break
+                        last_fp = fp
+
+                        images.append(img)
+
                         import hashlib
 
                         md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
@@ -1023,11 +1074,26 @@ class Command(BaseCommand):
                 png_bytes = self._capture_best_visual(driver)
                 if png_bytes:
                     try:
-                        images.append(Image.open(BytesIO(png_bytes)).convert("RGB"))
+                        img = Image.open(BytesIO(png_bytes)).convert("RGB")
+                        fp = self._img_dhash(img)
+                        if (
+                            i > 1
+                            and last_fp is not None
+                            and self._ham(fp, last_fp) <= 2
+                        ):
+                            self._log(
+                                "INFO",
+                                f"Visually same as page {i-1} (screenshot). Stopping.",
+                            )
+                            break
+                        last_fp = fp
+
+                        images.append(img)
                         self._log(
                             "INFO",
                             f"Page {i}: added fallback screenshot. Total now {len(images)}",
                         )
+
                     except Exception:
                         self._log("INFO", "Could not decode fallback visual.")
                 else:
