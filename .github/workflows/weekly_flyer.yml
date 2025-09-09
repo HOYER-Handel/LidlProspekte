@@ -61,21 +61,16 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install system deps (fonts, nss, gbm)
+      - name: Install system deps (Chrome headless)
         run: |
+          set -e
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libnss3 libgbm1 libasound2 \
-            fonts-liberation ttf-freefont fonts-noto-color-emoji
-          sudo rm -rf /var/lib/apt/lists/*
+          ASOUND_PKG=$(apt-cache show libasound2t64 >/dev/null 2>&1 && echo libasound2t64 || echo libasound2)
+          FREEFONT_PKG=$(apt-cache show fonts-freefont-ttf >/dev/null 2>&1 && echo fonts-freefont-ttf || echo ttf-freefont)
 
-      - name: Install system deps (fonts, nss, gbm)
-        run: |
-          sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libnss3 libgbm1 libasound2 \
-            fonts-liberation ttf-freefont fonts-noto-color-emoji
-          sudo rm -rf /var/lib/apt/lists/*
+            libnss3 libgbm1 "$ASOUND_PKG" \
+            fonts-liberation "$FREEFONT_PKG" fonts-noto-color-emoji
 
       - name: Install deps
         run: |

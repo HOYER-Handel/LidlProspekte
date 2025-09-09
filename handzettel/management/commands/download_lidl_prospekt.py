@@ -1,7 +1,12 @@
-# This Python class downloads flyer images from websites, creates a PDF from the images, saves the PDF
-# to a model, and uploads the PDF to SharePoint using the Microsoft Graph API.
+# This Python class downloads flyer images from websites, creates a PDF from the images,
+# saves the PDF to a model, and uploads the PDF to SharePoint using the Microsoft Graph API.
+# Patches added:
+# - FORCE_SCREENSHOT: force capture via Selenium (CI/Cloudflare-safe)
+# - RK_FORCE_TOPLEVEL: for Rabatt-Kompass, reload top-level URL with #page_{n}
+# - Chrome profile (--user-data-dir) to persist cookies during the loop
+# - More defensive waits + debug screenshots
 
-import re, time, datetime, json, urllib.parse, hashlib
+import re, time, datetime, json, urllib.parse, hashlib, os
 from io import BytesIO
 from urllib.parse import urlparse
 
@@ -13,7 +18,6 @@ from django.core.files.base import ContentFile
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-import selenium  # for version-based quirks if ever needed
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -22,7 +26,6 @@ from selenium.webdriver.support import expected_conditions as EC
 
 from handzettel.models import Handzettel
 
-import os  # for reading environment variables
 from dotenv import load_dotenv
 import msal  # microsoft authentication library
 
@@ -67,7 +70,11 @@ class Command(BaseCommand):
 
     # -------- tiny logger --------
     def _log(self, level: str, *parts):
-        print(f"[{level} {time.strftime('%H:%M:%S')}]", " ".join(str(p) for p in parts))
+        print(
+            f"[{level} {time.strftime('%H:%M:%S')}]",
+            " ".join(str(p) for p in parts),
+            flush=True,
+        )
 
     # ---------- Chrome / Cloudflare helpers ----------
     def _configure_chrome_options(self) -> Options:
@@ -78,7 +85,9 @@ class Command(BaseCommand):
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-blink-features=AutomationControlled")
+        # keep cookies/localStorage between page reloads during the job
         opts.add_argument("--user-data-dir=/tmp/chrome-profile")
+        # UA a bit “realistic”
         ua = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -330,9 +339,9 @@ class Command(BaseCommand):
                 reasons.append(f"overview:future+{b}")
             else:
                 days = (today - end).days
-                m = 40 + 3 * min(days, 30)
-                date_bonus -= m
-                reasons.append(f"overview:past-{m}")
+                m_ = 40 + 3 * min(days, 30)
+                date_bonus -= m_
+                reasons.append(f"overview:past-{m_}")
         elif start and not end:
             if today >= start:
                 date_bonus += 180
@@ -635,13 +644,10 @@ class Command(BaseCommand):
                 return
         except Exception:
             pass
-        # not found, try iframe
         self._enter_rk_viewer_frame(driver)
-        # if no iframe found, we remain at default_content (picker will still try)
 
     def _goto_rk_page_in_context(self, driver, n: int) -> None:
         """Navigate to page n within the current browsing context (top or frame)."""
-        # 1) Click thumbnail when available
         thumbs = driver.find_elements(By.CSS_SELECTOR, f"a[href$='#page_{n}']")
         if thumbs:
             try:
@@ -652,7 +658,6 @@ class Command(BaseCommand):
                 return
             except Exception:
                 pass
-        # 2) Change hash in-place
         try:
             driver.execute_script(
                 f"if (location.hash !== '#page_{n}') location.hash = '#page_{n}';"
@@ -663,7 +668,6 @@ class Command(BaseCommand):
             return
         except Exception:
             pass
-        # 3) Keyboard arrow (best effort)
         if n > 1:
             try:
                 body = driver.find_element(By.TAG_NAME, "body")
@@ -757,6 +761,12 @@ class Command(BaseCommand):
             )
         )
         self._log("DBG", "retailer_hint:", retailer_hint)
+
+        # feature flags (CI-proof)
+        force_screenshot = (os.getenv("CI", "").lower() == "true") or (
+            os.getenv("FORCE_SCREENSHOT", "0") == "1"
+        )
+        force_toplevel = os.getenv("RK_FORCE_TOPLEVEL", "0") == "1"
 
         # Resolve RK overview -> viewer
         resolved_slug = None
@@ -949,9 +959,6 @@ class Command(BaseCommand):
         self._apply_basic_stealth(driver)
 
         images: list[Image.Image] = []
-        force_screenshot = (os.getenv("CI", "").lower() == "true") or (
-            os.getenv("FORCE_SCREENSHOT", "0") == "1"
-        )
         slug_for_filename: str | None = None
         found_total_pages: int | None = None
         last_fp: int | None = None
@@ -992,19 +999,28 @@ class Command(BaseCommand):
                 )
                 prev_src = None
                 viewer_base = (driver.current_url or baseurl).split("#", 1)[0]
+
                 for i in range(1, pages + 1):
-                    target = f"{viewer_base}#page_{i}"
-                    self._log("INFO", f"Loading RK page {i}: {target}")
-                    driver.get(target)
-                    self._wait_cloudflare(driver)
-                    self._switch_to_viewer_context(driver)
-                    try:
-                        WebDriverWait(driver, 12).until(
-                            lambda d: self._current_main_img_src(d) is not None
+                    if force_toplevel:
+                        target = f"{viewer_base}#page_{i}"
+                        self._log("INFO", f"[RK] top-level reload page {i}: {target}")
+                        driver.get(target)
+                        self._wait_cloudflare(driver)
+                        self._switch_to_viewer_context(driver)
+                        try:
+                            WebDriverWait(driver, 12).until(
+                                lambda d: self._current_main_img_src(d) is not None
+                            )
+                        except Exception:
+                            pass
+                        new_src = self._current_main_img_src(driver)
+                    else:
+                        self._log("INFO", f"Paging to RK page {i}")
+                        self._switch_to_viewer_context(driver)
+                        self._goto_rk_page_in_context(driver, i)
+                        new_src = self._wait_main_img_src_changed(
+                            driver, prev_src, timeout=8.0
                         )
-                    except Exception:
-                        pass
-                    new_src = self._current_main_img_src(driver)
 
                     if i > 1 and (not new_src or new_src == prev_src):
                         found_total_pages = i - 1
@@ -1014,10 +1030,13 @@ class Command(BaseCommand):
                         )
                         break
 
-                    if not new_src:
+                    prev_src = new_src
+
+                    # Prefer screenshot in CI to avoid CF blocks
+                    if force_screenshot or not new_src:
                         self._log(
                             "INFO",
-                            f"No main image on page {i}; trying visual fallback…",
+                            "CI/screenshot mode or missing src: capturing visual…",
                         )
                         png_bytes = self._capture_best_visual(driver)
                         if not png_bytes:
@@ -1026,6 +1045,8 @@ class Command(BaseCommand):
                             )
                             break
                         try:
+                            with open(f"debug_rk_page_{i}.png", "wb") as dbg:
+                                dbg.write(png_bytes)
                             img = Image.open(BytesIO(png_bytes)).convert("RGB")
                             fp = self._img_dhash(img)
                             if (
@@ -1041,19 +1062,16 @@ class Command(BaseCommand):
                                 break
                             last_fp = fp
                             images.append(img)
-                            prev_src = f"fp:{fp}"
                             self._log(
                                 "INFO",
-                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                                f"Page {i}: added screenshot. Total now {len(images)}",
                             )
                             continue
                         except Exception:
-                            self._log("INFO", "Could not decode fallback visual.")
+                            self._log("INFO", "Could not decode visual.")
                             break
 
-                    prev_src = new_src
-
-                    # Safer hi-res: replace trailing -{size}-{token}.ext only (won't hit the year)
+                    # If not forcing screenshot, try direct GET (may be blocked by CF)
                     hi_url = (
                         re.sub(
                             r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
@@ -1063,20 +1081,10 @@ class Command(BaseCommand):
                         )
                         or new_src
                     )
-                    if force_screenshot:
-                        self._log(
-                            "INFO",
-                            "CI mode: skipping direct GET; using visual fallback (screenshot).",
-                        )
-                        r = None
-                    else:
-                        self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
-                        try:
-                            r = session.get(hi_url, timeout=20)
-                        except Exception as e:
-                            self._log("DBG", "Direct GET failed:", e)
-                            r = None
-
+                    self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
+                    ok = False
+                    try:
+                        r = session.get(hi_url, timeout=20)
                         self._log(
                             "DBG",
                             "GET",
@@ -1086,41 +1094,40 @@ class Command(BaseCommand):
                             "lenHdr=",
                             len(r.content) if r.ok else 0,
                         )
-                        if (
-                            r is not None
-                            and getattr(r, "status_code", 0) == 200
-                            and r.content
-                        ):
-                            try:
-                                img = Image.open(BytesIO(r.content)).convert("RGB")
-                            except Exception:
-                                img = None
-                            if img is not None:
-                                fp = self._img_dhash(img)
-                                if (
-                                    i > 1
-                                    and last_fp is not None
-                                    and self._ham(fp, last_fp) <= 2
-                                ):
-                                    found_total_pages = i - 1
-                                    self._log(
-                                        "INFO",
-                                        f"Visually same as page {found_total_pages}. Stopping.",
-                                    )
-                                    break
-                                last_fp = fp
-                                images.append(img)
+                        if r.status_code == 200 and r.content:
+                            img = Image.open(BytesIO(r.content)).convert("RGB")
+                            fp = self._img_dhash(img)
+                            if (
+                                i > 1
+                                and last_fp is not None
+                                and self._ham(fp, last_fp) <= 2
+                            ):
+                                found_total_pages = i - 1
                                 self._log(
                                     "INFO",
-                                    f"Page {i}: added image. Total now {len(images)}",
+                                    f"Visually same as page {found_total_pages}. Stopping.",
                                 )
-                                continue
+                                break
+                            last_fp = fp
+                            images.append(img)
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added image. Total now {len(images)}",
+                            )
+                            ok = True
+                    except Exception as e:
+                        self._log("DBG", "Direct GET failed:", e)
 
-                    # Fallback screenshot in viewer
+                    if ok:
+                        continue
+
+                    # Fallback screenshot
                     self._log("INFO", "Direct download failed; trying visual fallback…")
                     png_bytes = self._capture_best_visual(driver)
                     if png_bytes:
                         try:
+                            with open(f"debug_rk_page_{i}.png", "wb") as dbg:
+                                dbg.write(png_bytes)
                             img = Image.open(BytesIO(png_bytes)).convert("RGB")
                             fp = self._img_dhash(img)
                             if (
@@ -1188,6 +1195,44 @@ class Command(BaseCommand):
                     except Exception:
                         pass
 
+                    # Prefer screenshot in CI
+                    if force_screenshot:
+                        self._log("INFO", "CI/screenshot mode: capturing visual…")
+                        png_bytes = self._capture_best_visual(driver)
+                        if not png_bytes:
+                            self._log(
+                                "INFO",
+                                f"No visual content captured on page {i}. Stopping here.",
+                            )
+                            break
+                        try:
+                            with open(f"debug_lidl_page_{i}.png", "wb") as dbg:
+                                dbg.write(png_bytes)
+                            img = Image.open(BytesIO(png_bytes)).convert("RGB")
+                            fp = self._img_dhash(img)
+                            if (
+                                i > 1
+                                and last_fp is not None
+                                and self._ham(fp, last_fp) <= 2
+                            ):
+                                found_total_pages = i - 1
+                                self._log(
+                                    "INFO",
+                                    f"Visually same as page {found_total_pages}. Stopping.",
+                                )
+                                break
+                            last_fp = fp
+                            images.append(img)
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added screenshot. Total now {len(images)}",
+                            )
+                            continue
+                        except Exception:
+                            self._log("INFO", "Could not decode visual.")
+                            break
+
+                    # Not forcing screenshot → try direct URL
                     img_url = self.pick_image_url(driver)
                     if not img_url:
                         self._log(
@@ -1201,6 +1246,8 @@ class Command(BaseCommand):
                             )
                             break
                         try:
+                            with open(f"debug_lidl_page_{i}.png", "wb") as dbg:
+                                dbg.write(png_bytes)
                             img = Image.open(BytesIO(png_bytes)).convert("RGB")
                             fp = self._img_dhash(img)
                             if (
@@ -1226,6 +1273,7 @@ class Command(BaseCommand):
                             break
 
                     self._log("DBG", "Chosen (possibly hi-res) image:", img_url)
+                    ok = False
                     try:
                         r = requests.get(img_url, timeout=20)
                         self._log(
@@ -1238,37 +1286,39 @@ class Command(BaseCommand):
                             len(r.content) if r.ok else 0,
                         )
                         if r.status_code == 200 and r.content:
-                            try:
-                                img = Image.open(BytesIO(r.content)).convert("RGB")
-                            except Exception:
-                                img = None
-                            if img is not None:
-                                fp = self._img_dhash(img)
-                                if (
-                                    i > 1
-                                    and last_fp is not None
-                                    and self._ham(fp, last_fp) <= 2
-                                ):
-                                    found_total_pages = i - 1
-                                    self._log(
-                                        "INFO",
-                                        f"Visually same as page {found_total_pages}. Stopping.",
-                                    )
-                                    break
-                                last_fp = fp
-                                images.append(img)
+                            img = Image.open(BytesIO(r.content)).convert("RGB")
+                            fp = self._img_dhash(img)
+                            if (
+                                i > 1
+                                and last_fp is not None
+                                and self._ham(fp, last_fp) <= 2
+                            ):
+                                found_total_pages = i - 1
                                 self._log(
                                     "INFO",
-                                    f"Page {i}: added image. Total now {len(images)}",
+                                    f"Visually same as page {found_total_pages}. Stopping.",
                                 )
-                                continue
+                                break
+                            last_fp = fp
+                            images.append(img)
+                            self._log(
+                                "INFO",
+                                f"Page {i}: added image. Total now {len(images)}",
+                            )
+                            ok = True
                     except Exception as e:
                         self._log("DBG", "Direct GET failed:", e)
 
+                    if ok:
+                        continue
+
+                    # Fallback screenshot
                     self._log("INFO", "Direct download failed; trying visual fallback…")
                     png_bytes = self._capture_best_visual(driver)
                     if png_bytes:
                         try:
+                            with open(f"debug_lidl_page_{i}.png", "wb") as dbg:
+                                dbg.write(png_bytes)
                             img = Image.open(BytesIO(png_bytes)).convert("RGB")
                             fp = self._img_dhash(img)
                             if (
@@ -1301,7 +1351,8 @@ class Command(BaseCommand):
 
         if not images:
             self._log("INFO", "No page images found!")
-            return
+            # Optional explicit non-zero for CI visibility
+            raise SystemExit(100)
 
         # Build PDF
         pdf = BytesIO()
@@ -1372,12 +1423,12 @@ class Command(BaseCommand):
 
         def die(msg, *extra):
             print("ERROR", msg, *extra)
-            return
+            raise SystemExit(100)
 
         if not all(
             [client_id, client_secret, tenant_id, sharepoint_site, sharepoint_folder]
         ):
-            return die("ERROR: SharePoint/Azure configuration missing!")
+            die("ERROR: SharePoint/Azure configuration missing!")
 
         try:
             app = msal.ConfidentialClientApplication(
@@ -1389,7 +1440,7 @@ class Command(BaseCommand):
                 scopes=["https://graph.microsoft.com/.default"]
             )
             if "access_token" not in token_result:
-                return die(
+                die(
                     "ERROR: Could not get access token:",
                     token_result.get("error_description"),
                     token_result,
@@ -1398,7 +1449,7 @@ class Command(BaseCommand):
             headers = {"Authorization": f"Bearer {token}"}
             self._log("INFO", "OK: Got access token")
         except Exception as e:
-            return die("MSAL token error", e)
+            die("MSAL token error", e)
 
         try:
             site_info = requests.get(
@@ -1408,7 +1459,7 @@ class Command(BaseCommand):
             self._log("DBG", "GET site status:", site_info.status_code)
             if site_info.status_code != 200:
                 print("GET site body:", site_info.text[:800])
-                return die(
+                die(
                     "cannot read site.Check sharepoint site and permissions",
                     site_info.text,
                 )
@@ -1416,9 +1467,9 @@ class Command(BaseCommand):
             site_id = site_json.get("id")
             self._log("INFO", "OK site id =", site_id)
             if not site_id:
-                return die("site ID missing in response", site_json)
+                die("site ID missing in response", site_json)
         except Exception as e:
-            return die("site lookup failed", e)
+            die("site lookup failed", e)
 
         def _norm(name: str) -> str:
             return (name or "").lower().replace(" ", "").replace("_", "")
@@ -1434,9 +1485,7 @@ class Command(BaseCommand):
                 )
                 self._log("DBG", "GET drives status:", drives_resp.status_code)
                 if drives_resp.status_code != 200:
-                    return die(
-                        "cannot list drives. Permissions missing!", drives_resp.text
-                    )
+                    die("cannot list drives. Permissions missing!", drives_resp.text)
                 drives = drives_resp.json().get("value", [])
                 self._log(
                     "DBG",
@@ -1444,7 +1493,7 @@ class Command(BaseCommand):
                     [(d.get("name"), d.get("id")) for d in drives],
                 )
                 if not drives:
-                    return die("No drives found on the site.")
+                    die("No drives found on the site.")
 
                 library_name = sharepoint_folder.split("/")[0].strip()
                 drive = (
@@ -1474,7 +1523,7 @@ class Command(BaseCommand):
                 drive_id = drive["id"]
                 self._log("INFO", "OK: Using drive:", drive.get("name"), drive_id)
         except Exception as e:
-            return die("Drive lookup failed", e)
+            die("Drive lookup failed", e)
 
         def ensure_folder_path(drive_id: str, folder_path: str):
             parts = [p for p in folder_path.split("/") if p.strip()]
@@ -1520,13 +1569,12 @@ class Command(BaseCommand):
                 ensure_folder_path(drive_id, nested_subpath)
                 self._log("INFO", "OK: Folder path ensured:", nested_subpath)
         except Exception as e:
-            return die("Creating/checking folder path failed", e)
+            die("Creating/checking folder path failed", e)
 
         try:
             upload_path = "/".join([nested_subpath, filename])
             self._log("INFO", "Uploading to path:", upload_path)
             upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
-            # handzettel.file is in Django storage; we saved to DB; re-read from storage:
             file_bytes = handzettel.datei.read()
             resp = requests.put(upload_url, headers=headers, data=file_bytes)
             self._log("INFO", "PUT upload status:", resp.status_code)
@@ -1550,9 +1598,9 @@ class Command(BaseCommand):
                 self._log("INFO", "PDF successfully uploaded to SharePoint!")
             else:
                 print("Response body (truncated):", (resp.text or "")[:500])
-                return die("Error uploading to SharePoint:", resp.status_code)
+                die("Error uploading to SharePoint:", resp.status_code)
         except Exception as e:
-            return die("Upload exception", e)
+            die("Upload exception", e)
 
         def search_in_drive(name: str):
             try:
