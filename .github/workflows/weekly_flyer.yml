@@ -10,7 +10,6 @@ jobs:
   run:
     runs-on: ubuntu-latest
 
-    # (Optional) job-level envs
     env:
       DJANGO_SETTINGS_MODULE: prospektprojekt.settings
       SECRET_KEY: ${{ secrets.SECRET_KEY }}

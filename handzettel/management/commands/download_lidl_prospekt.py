@@ -109,7 +109,7 @@ class Command(BaseCommand):
     # waits if cloudflare shows "just a moment" challenges
 
     # it pauses script while Cloudflare is showing the "just a moment"bot check page, then contines once the real page is ready
-    # This function waits just long enough so the real content can load
+    # This function waits just long enough so the real content can load -> pause 1 , 2 sec
     def _wait_cloudflare(self, driver, max_wait=25):
         """Wait through Cloudflare 'Just a moment…' challenge."""
         start = time.time()
@@ -595,7 +595,7 @@ class Command(BaseCommand):
             return chosen
         return None
 
-    # This function grabs the best possible screenshot from the page (as PNG bytes) so we can still build the PDF.
+    # If direct download fails → returns PNG bytes of the page image
     def _capture_best_visual(self, driver) -> bytes | None:
         try:
             best, area = None, 0
@@ -648,8 +648,14 @@ class Command(BaseCommand):
         except Exception:
             return None
 
-    #####
+    # 64-bit perceptual hash (dHash) to compare “looks the same?”
     def _img_dhash(self, img: Image.Image) -> int:
+        """
+        Build a 64-bit 'difference hash' (dHash) for an image.
+        Idea: convert to grayscale, shrink to 9x8 pixels, then for each row
+        compare every pixel to its right neighbor. If left > right => bit 1, else 0.
+        This produces 8 comparisons x 8 rows = 64 bits. Great for "looks the same?" checks.
+        """
         small = img.convert("L").resize((9, 8), Image.LANCZOS)
         px = list(small.getdata())
         bits = 0
@@ -659,7 +665,13 @@ class Command(BaseCommand):
                 bits = (bits << 1) | (1 if px[row + c] > px[row + c + 1] else 0)
         return bits
 
+    # Hamming distance between two hashes (# of different bits), exple:_ham(0b1010, 0b1000) → 1
     def _ham(self, a: int, b: int) -> int:
+        """
+        Compute the Hamming distance between two integers (hashes).
+        It returns how many bits are different between 'a' and 'b'.
+        Lower = more similar, 0 = identical.
+        """
         x = a ^ b
         cnt = 0
         while x:
@@ -667,7 +679,15 @@ class Command(BaseCommand):
             cnt += 1
         return cnt
 
+    # Finds an iframe containing img[src*='/public/gimg/'] → returns True OR False
     def _enter_rk_viewer_frame(self, driver) -> bool:
+        """
+        Try to switch Selenium into the Rabatt-Kompass 'viewer' iframe.
+        Many sites render the main page image inside an <iframe>;
+        Selenium must switch into that frame to find elements there.
+        Returns True if we found the right iframe and switched into it.
+        """
+
         driver.switch_to.default_content()
         for f in driver.find_elements(By.CSS_SELECTOR, "iframe"):
             try:
@@ -683,7 +703,13 @@ class Command(BaseCommand):
                 driver.switch_to.default_content()
         return False
 
+    # If not already seeing /public/gimg/ → it calls _enter_rk_viewer_frame
     def _switch_to_viewer_context(self, driver) -> None:
+        """
+        Ensure Selenium is in the correct context to see the flyer page image.
+        If the current context already shows a /public/gimg/ image, do nothing.
+        Otherwise, try entering the viewer iframe.
+        """
         try:
             ok = driver.execute_script(
                 "try { return !!document.querySelector(\"img[src*='/public/gimg/']\"); } catch(e){ return false; }"
@@ -693,18 +719,6 @@ class Command(BaseCommand):
         except Exception:
             pass
         self._enter_rk_viewer_frame(driver)
-
-    def _img_dhash(self, img: Image.Image) -> int:
-        small = img.convert("L").resize((9, 8), Image.LANCZOS)
-        px = list(small.getdata())
-        bits = 0
-        for r in range(8):
-            row = r * 9
-            for c in range(8):
-                bits = (bits << 1) | (1 if px[row + c] > px[row + c + 1] else 0)
-        return bits
-
-    #####
 
     # --- Download one image from a URL and return it as a PIL Image.--
     def fetch_image(self, url: str) -> Image.Image | None:
@@ -718,15 +732,17 @@ class Command(BaseCommand):
             pass
         return None
 
-    # Turn a market name into the SharePoint folder name we use
+    # map brancd to SharePoint folder name
     def brand_folder_name(self, market: str) -> str:
         # a small dictionary
         mapping = {
-            "lidl": "LIDL",
+            "lidl": "LIDL",  # brand_folder_name("lidl") → "LIDL"
             "aldi_nord": "ALDI_NORD",
             "aldi_sued": "ALDI_SUED",
         }
-        return mapping.get((market or "").lower(), "MISC")
+        return mapping.get(
+            (market or "").lower(), "MISC"
+        )  # brand_folder_name("unknown") → "MISC"
 
     # main flow
     def handle(self, *args, **opts):
