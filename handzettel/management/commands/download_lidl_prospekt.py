@@ -66,11 +66,11 @@ class Command(BaseCommand):
             help="On overview pages, pick 'current' (default), 'upcoming' (Vorschau), or 'latest' uploaded id.",
         )
 
-    # simple logger
+    # simple logger--> helps to see what the script is doing step by step
     def _log(self, level: str, *parts):
         print(f"[{level} {time.strftime('%H:%M:%S')}]", " ".join(str(p) for p in parts))
 
-    # ---------- Chrome / Cloudflare helpers ----------
+    # ---------- Chrome / Cloudflare helpers --> Runs Chrome without a window (headless)
     def _configure_chrome_options(self) -> Options:
         opts = Options()
         opts.add_argument("--headless=new")
@@ -87,6 +87,7 @@ class Command(BaseCommand):
         opts.add_argument(f"--user-agent={ua}")
         return opts
 
+    # make selenium look less like a bot--> Hides the 'navigator.webdriver' flag that some sites use to detect bots
     def _apply_basic_stealth(self, driver):
         try:
             driver.execute_cdp_cmd(
@@ -98,6 +99,8 @@ class Command(BaseCommand):
         except Exception:
             pass
 
+    # Detects when Cloudflare is showing a challenge page and waits a bit
+    # Continues as soon as the real page is available
     def _wait_cloudflare(self, driver, max_wait=25):
         """Wait through Cloudflare 'Just a moment…' challenge."""
         start = time.time()
@@ -123,30 +126,25 @@ class Command(BaseCommand):
                 pass
             break
 
-    # --- Build the correct URL for each page depending on the site ---
+    # --- Build the correct URL---
     def page_url(self, baseurl: str, n: int) -> str:
-        if "lidl.de" in baseurl:
-            if re.search(r"/page/\d+", baseurl):
-                return re.sub(r"/page/\d+", f"/page/{n}", baseurl)
-            parts = baseurl.split("?", 1)
-            path = parts[0].rstrip("/")
-            query = f"?{parts[1]}" if len(parts) == 2 else ""
-            return f"{path}/page/{n}{query}"
         if re.search(r"#page_\d+", baseurl):
             return re.sub(r"#page_\d+", f"#page_{n}", baseurl)
         return f"{baseurl}#page_{n}"
 
-    # --- Slug helpers ---
+    # --- Slug helpers:Takes the last part of the path and keeps only letters, numbers, '-' and '_'.
+    # Useful for building filenames
     def url_slug(self, url: str) -> str:
         path = urlparse(url).path.rstrip("/")
         seg = (path.split("/")[-1] or "prospekt").lower()
         return re.sub(r"[^a-z0-9_-]+", "-", seg)
 
+    # If the URL contains '/prospekt-<id>-0', returns that exact piece
     def viewer_slug(self, url: str) -> str | None:
         m = re.search(r"/prospekt-(\d+)-0", url)
         return f"prospekt-{m.group(1)}-0" if m else None
 
-    # --- Cookie banner ---
+    # --- Cookie banner: Like closing a cookie pop-up so you can see the page content
     def accept_cookies_if_present(self, driver):
         for locator in [
             (By.ID, "onetrust-accept-btn-handler"),
@@ -163,6 +161,7 @@ class Command(BaseCommand):
             except Exception:
                 pass
 
+    # Wait for the first page to actually load images, then trigger lazy-loading
     def _wait_first_page_ready(self, driver):
         if "rabatt-kompass.de" in (driver.current_url or ""):
             try:
@@ -188,6 +187,7 @@ class Command(BaseCommand):
             pass
 
     # ---- Date extraction ----
+    # _extract_date_range("Angebote 01.09.–07.09.") on 2025-09-02  → (2025-09-01, 2025-09-07)
     def _extract_date_range(self, blob_lower: str):
         today = datetime.date.today()
         year = today.year
@@ -236,10 +236,9 @@ class Command(BaseCommand):
     def _retailer_phrase_bonus(
         self, blob: str, retailer_hint: str, mode: str
     ) -> tuple[int, list[str]]:
-        # You requested date-only selection → no phrase influence.
         return 0, []
 
-    # scoring helper
+    # scoring helper:    Small nudge based on the numeric prospekt id in the URL
     def _id_bias(self, href: str, mode: str) -> tuple[int, str]:
         m = re.search(r"/prospekt-(\d+)-0", href)
         if not m:
@@ -252,9 +251,11 @@ class Command(BaseCommand):
             add = (pid % 13) - 6  # -6..+6 tiny nudge
             return add, f"id(light):{pid}(+{add})"
 
+    #  Score a viewer link found on an overview page.Returns score
     def _score_rk_viewer_link(
         self, a, retailer_hint: str, mode: str
     ) -> tuple[int, str, str]:
+        # a.Reads text around the link (title + nearby card text).
         href = a.get_attribute("href") or ""
         title = (a.get_attribute("title") or "").strip()
         text = (a.text or "").strip()
@@ -268,7 +269,7 @@ class Command(BaseCommand):
         blob = " ".join([title, text, card]).lower()
 
         s, reasons = 0, []
-
+        # b.Extracts dates → gives positive score if 'current', future score if 'upcoming',negative score if 'past'.
         start, end = self._extract_date_range(blob)
         today = datetime.date.today()
         date_bonus = 0
@@ -390,7 +391,7 @@ class Command(BaseCommand):
                 "reason": f"viewer:error {e}",
             }
 
-    # ---- Visual picking / fallbacks ----
+    # ---- Visual picking :Find the single best image URL for the current flyer page
     def pick_image_url(self, driver) -> str | None:
         on_rk = "rabatt-kompass.de" in (driver.current_url or "")
         imgs = (
@@ -488,6 +489,7 @@ class Command(BaseCommand):
             return chosen
         return None
 
+    # If images are drawn on a canvas (no URL), we still capture what to see
     def _capture_best_visual(self, driver) -> bytes | None:
         try:
             best, area = None, 0
@@ -540,7 +542,8 @@ class Command(BaseCommand):
         except Exception:
             return None
 
-    # 64-bit perceptual hash (dHash)
+    #  Converts image to 9x8 grayscale and compares neighboring pixels.
+    # Result is a 64-bit integer; similar-looking images produce similar hashes.
     def _img_dhash(self, img: Image.Image) -> int:
         small = img.convert("L").resize((9, 8), Image.LANCZOS)
         px = list(small.getdata())
@@ -551,6 +554,7 @@ class Command(BaseCommand):
                 bits = (bits << 1) | (1 if px[row + c] > px[row + c + 1] else 0)
         return bits
 
+    # Hamming distance between two integer hashes: _ham(0b1010, 0b1000) → 1 (only one bit different).
     def _ham(self, a: int, b: int) -> int:
         x = a ^ b
         cnt = 0
@@ -559,6 +563,7 @@ class Command(BaseCommand):
             cnt += 1
         return cnt
 
+    # Enter the rabatt-kompass <iframe> that contains the flyer image.
     def _enter_rk_viewer_frame(self, driver) -> bool:
         driver.switch_to.default_content()
         for f in driver.find_elements(By.CSS_SELECTOR, "iframe"):
@@ -575,6 +580,7 @@ class Command(BaseCommand):
                 driver.switch_to.default_content()
         return False
 
+    # Ensure Selenium is currently inside the right context to see the flyer image
     def _switch_to_viewer_context(self, driver) -> None:
         try:
             ok = driver.execute_script(
@@ -603,7 +609,9 @@ class Command(BaseCommand):
             "aldi_nord": "ALDI_NORD",
             "aldi_sued": "ALDI_SUED",
         }
-        return mapping.get((market or "").lower(), "MISC")
+        return mapping.get(
+            (market or "").lower(), "MISC"
+        )  # Returns 'MISC' if the retailer is unknown.
 
     # main flow
     def handle(self, *args, **opts):
