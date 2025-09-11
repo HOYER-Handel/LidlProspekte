@@ -232,12 +232,6 @@ class Command(BaseCommand):
 
         return None, None
 
-    # ---- Phrase bonus (simplified to date-only) ----
-    def _retailer_phrase_bonus(
-        self, blob: str, retailer_hint: str, mode: str
-    ) -> tuple[int, list[str]]:
-        return 0, []
-
     # scoring helper:    Small nudge based on the numeric prospekt id in the URL
     def _id_bias(self, href: str, mode: str) -> tuple[int, str]:
         m = re.search(r"/prospekt-(\d+)-0", href)
@@ -259,55 +253,41 @@ class Command(BaseCommand):
         href = a.get_attribute("href") or ""
         title = (a.get_attribute("title") or "").strip()
         text = (a.text or "").strip()
-        try:
-            card = a.find_element(
-                By.XPATH,
-                "ancestor-or-self::*[self::article or self::li or self::div][1]",
-            ).text.strip()
-        except Exception:
-            card = ""
-        blob = " ".join([title, text, card]).lower()
+        blob = " ".join([title, text]).lower()
 
-        s, reasons = 0, []
         # b.Extracts dates → gives positive score if 'current', future score if 'upcoming',negative score if 'past'.
         start, end = self._extract_date_range(blob)
         today = datetime.date.today()
-        date_bonus = 0
+        score, reasons = 0, []
+
         if start and end:
             if start <= today <= end:
-                date_bonus += 300
-                reasons.append("overview:heute+300")
+                score += 1000
+                reasons.append("current")
             elif today < start:
                 days = (start - today).days
-                b = max(0, 250 - 10 * days)
-                date_bonus += b
-                reasons.append(f"overview:future+{b}")
+                score += max(1, 500 - 5 * days)  # closer future → higher
+                reasons.append(f"upcoming_in_{days}d")
             else:
-                days = (today - end).days
-                m = 40 + 3 * min(days, 30)
-                date_bonus -= m
-                reasons.append(f"overview:past-{m}")
+                score -= 150
+                reasons.append("past")
         elif start and not end:
             if today >= start:
-                date_bonus += 180
-                reasons.append("overview:ab+180")
+                score += 800
+                reasons.append("current_Ab")
             else:
                 days = (start - today).days
-                b = max(0, 160 - 8 * days)
-                date_bonus += b
-                reasons.append(f"overview:ab_future+{b}")
+                score += max(1, 400 - 5 * days)
+                reasons.append(f"upcoming_ab_in_{days}d")
 
-        s += date_bonus
-
-        phrase_b, why = self._retailer_phrase_bonus(blob, retailer_hint, mode)
-        s += phrase_b
-        reasons.extend(why)
+        else:
+            reasons.append("no_dates_in_link")
 
         id_b, why_id = self._id_bias(href, mode)
-        s += id_b
-        reasons.append(why_id)
-
-        return int(s), href, ", ".join(reasons)
+        score += id_b
+        if why_id:
+            reasons.append(why_id)
+        return int(score), href, ", ".join(reasons)
 
     # Inspect viewer page for real dates / status
     def _inspect_viewer_details(self, driver, href: str):
