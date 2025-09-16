@@ -30,7 +30,7 @@ load_dotenv()
 
 # standard django container --> it s a Django management command, it downloads a flyer from a website and makes PDF
 class Command(BaseCommand):
-    help = "Download a flyer as a PDF (supports rabatt-kompass.de)."
+    help = "Download a flyer as a PDF (supports rabatt-kompass.de and lidl.de)."
 
     # define command line inputs
     def add_arguments(self, parser):
@@ -70,7 +70,7 @@ class Command(BaseCommand):
     def _log(self, level: str, *parts):
         print(f"[{level} {time.strftime('%H:%M:%S')}]", " ".join(str(p) for p in parts))
 
-    # ---------- Chrome / Cloudflare helpers --> Runs Chrome without a window (headless).Selenium uses these options so Chrome runs without a window
+    # ---------- Chrome / Cloudflare helpers --> Runs Chrome without a window (headless)
     def _configure_chrome_options(self) -> Options:
         opts = Options()
         opts.add_argument("--headless=new")
@@ -126,7 +126,7 @@ class Command(BaseCommand):
                 pass
             break
 
-    # --- Build the correct URL--- Ensures the URL points to #page_n
+    # --- Build the correct URL---
     def page_url(self, baseurl: str, n: int) -> str:
         if re.search(r"#page_\d+", baseurl):
             return re.sub(r"#page_\d+", f"#page_{n}", baseurl)
@@ -139,7 +139,7 @@ class Command(BaseCommand):
         seg = (path.split("/")[-1] or "prospekt").lower()
         return re.sub(r"[^a-z0-9_-]+", "-", seg)
 
-    # If the URL contains '/prospekt-<id>-0', returns that exact piece,exple:"/prospekt-12345-0" → "prospekt-12345-0"
+    # If the URL contains '/prospekt-<id>-0', returns that exact piece
     def viewer_slug(self, url: str) -> str | None:
         m = re.search(r"/prospekt-(\d+)-0", url)
         return f"prospekt-{m.group(1)}-0" if m else None
@@ -233,7 +233,6 @@ class Command(BaseCommand):
         return None, None
 
     #  Score a viewer link found on an overview page.Returns score
-    # Scores a viewer link found on an overview page:+1000 if dates include today (current),smaller positive for upcoming,negative for past,
     def _score_rk_viewer_link(
         self, a, retailer_hint: str, mode: str
     ) -> tuple[int, str, str]:
@@ -270,6 +269,7 @@ class Command(BaseCommand):
 
         else:
             reasons.append("no_dates_in_link")
+
         return int(score), href, ", ".join(reasons)
 
     # Inspect viewer page for real dates / status
@@ -353,68 +353,6 @@ class Command(BaseCommand):
                 "bonus": 0,
                 "reason": f"viewer:error {e}",
             }
-
-    ###################
-    def _status_rank(self, s: str) -> int:
-        # higher is better
-        return {"current": 3, "upcoming": 2, "unknown": 1, "past": 0}.get(s, 1)
-
-    def _pick_by_dates_only(self, verified: list[dict], desired_mode: str):
-        """
-        verified items each have: href, status, start, end (as returned by _inspect_viewer_details)
-        Selection rules:
-        - prefer current > upcoming > unknown > past
-        - among current: later end is better
-        - among upcoming: sooner start is better
-        - deterministic fallback: alphabetical href
-        - if desired_mode == "upcoming": force upcoming if any
-        - if desired_mode == "latest": pick most recent dates (start/end), still date-based
-        """
-        today = datetime.date.today()
-
-        def sort_key_general(v):
-            s = v.get("status")
-            st = v.get("start")
-            en = v.get("end")
-            status_score = -self._status_rank(s)
-            upcoming_delta = (st - today).days if (s == "upcoming" and st) else 99999
-            current_end_ord = -(en.toordinal()) if (s == "current" and en) else 0
-            return (status_score, upcoming_delta, current_end_ord, v.get("href", ""))
-
-        if not verified:
-            return None
-
-        if desired_mode == "upcoming":
-            ups = [v for v in verified if v["status"] == "upcoming"]
-            if ups:
-                ups.sort(key=lambda v: ((v.get("start") or datetime.date.max)))
-                return ups[0]
-            # fall back to general
-            verified = sorted(verified, key=sort_key_general)
-            return verified[0]
-
-        if desired_mode == "latest":
-            # still date-based: later (start,end) wins
-            verified2 = sorted(
-                verified,
-                key=lambda v: (
-                    (v.get("start") or datetime.date.min),
-                    (v.get("end") or datetime.date.min),
-                ),
-                reverse=True,
-            )
-            return verified2[0]
-
-        # default: "current"
-        curs = [v for v in verified if v["status"] == "current"]
-        if curs:
-            curs.sort(key=lambda v: (v.get("end") or today), reverse=True)
-            return curs[0]
-
-        verified = sorted(verified, key=sort_key_general)
-        return verified[0]
-
-    ###########################
 
     # ---- Visual picking :Find the single best image URL for the current flyer page
     def pick_image_url(self, driver) -> str | None:
@@ -567,7 +505,7 @@ class Command(BaseCommand):
         except Exception:
             return None
 
-    #  Converts image to 9x8 grayscale and compares neighboring pixels.similar pages → similar hashes.
+    #  Converts image to 9x8 grayscale and compares neighboring pixels.
     # Result is a 64-bit integer; similar-looking images produce similar hashes.
     def _img_dhash(self, img: Image.Image) -> int:
         small = img.convert("L").resize((9, 8), Image.LANCZOS)
@@ -580,7 +518,6 @@ class Command(BaseCommand):
         return bits
 
     # Hamming distance between two integer hashes: _ham(0b1010, 0b1000) → 1 (only one bit different).
-    # _ham(h1, h2) <= 2 → “same page” → stop iterating further pages.
     def _ham(self, a: int, b: int) -> int:
         x = a ^ b
         cnt = 0
@@ -640,10 +577,7 @@ class Command(BaseCommand):
         )  # Returns 'MISC' if the retailer is unknown.
 
     # main flow
-    # main flow
-
     def handle(self, *args, **opts):
-        # reads CLI options
         baseurl = opts["baseurl"]
         pages = opts["pages"]
         filename_mode = opts.get("filename_mode", "auto")
@@ -742,17 +676,72 @@ class Command(BaseCommand):
                                 }
                             )
 
-                        # === dates-only selection (regex path) ===
-                        choice = self._pick_by_dates_only(verified, rk_pick_mode)
-                        if choice:
-                            baseurl = choice["href"]
-                            resolved_slug = self.viewer_slug(baseurl)
-                            target_viewers = [baseurl]
+                        current_items = [
+                            v for v in verified if v["status"] == "current"
+                        ]
+                        if current_items:
+
+                            def _pid(v):
+                                m = re.search(r"/prospekt-(\d+)-0", v["href"])
+                                return int(m.group(1)) if m else 0
+
+                            current_items.sort(
+                                key=lambda v: (v["total"], _pid(v)), reverse=True
+                            )
+                            target_viewers = [v["href"] for v in current_items]
                             self._log(
                                 "INFO",
-                                "Redirecting to viewer (regex fallback):",
-                                baseurl,
+                                f"Found {len(target_viewers)} current viewers (regex path).",
                             )
+                        else:
+                            # single-choice fallback
+                            def pick_by_status(desired):
+                                c = [v for v in verified if v["status"] == desired]
+                                return max(c, key=lambda v: v["total"]) if c else None
+
+                            choice = None
+                            if rk_pick_mode == "current":
+                                choice = (
+                                    pick_by_status("current")
+                                    or pick_by_status("unknown")
+                                    or pick_by_status("upcoming")
+                                )
+                            elif rk_pick_mode == "upcoming":
+                                upcoming = [
+                                    v for v in verified if v["status"] == "upcoming"
+                                ]
+                                if upcoming and any(v["start"] for v in upcoming):
+                                    upcoming.sort(
+                                        key=lambda v: (
+                                            v["start"] or datetime.date.max,
+                                            -v["total"],
+                                        )
+                                    )
+                                    choice = upcoming[0]
+                                else:
+                                    choice = pick_by_status(
+                                        "upcoming"
+                                    ) or pick_by_status("current")
+                            else:  # latest
+                                verified.sort(
+                                    key=lambda v: int(
+                                        re.search(
+                                            r"/prospekt-(\d+)-0", v["href"]
+                                        ).group(1)
+                                    ),
+                                    reverse=True,
+                                )
+                                choice = verified[0] if verified else None
+
+                            if choice:
+                                baseurl = choice["href"]
+                                resolved_slug = self.viewer_slug(baseurl)
+                                target_viewers = [baseurl]
+                                self._log(
+                                    "INFO",
+                                    "Redirecting to viewer (regex fallback):",
+                                    baseurl,
+                                )
                     else:
                         # Have DOM 'top' candidates → verify
                         dump = json.dumps(
@@ -779,13 +768,74 @@ class Command(BaseCommand):
                                 }
                             )
 
-                        # === dates-only selection (normal DOM path) ===
-                        choice = self._pick_by_dates_only(verified, rk_pick_mode)
-                        best_href = choice["href"] if choice else top[0][1]
-                        self._log("INFO", "Redirecting to viewer:", best_href)
-                        baseurl = best_href
-                        resolved_slug = self.viewer_slug(best_href)
-                        target_viewers = [best_href]
+                        current_items = [
+                            v for v in verified if v["status"] == "current"
+                        ]
+                        if current_items:
+
+                            def _pid(v):
+                                m = re.search(r"/prospekt-(\d+)-0", v["href"])
+                                return int(m.group(1)) if m else 0
+
+                            current_items.sort(
+                                key=lambda v: (v["total"], _pid(v)), reverse=True
+                            )
+                            target_viewers = [v["href"] for v in current_items]
+                            self._log(
+                                "INFO",
+                                f"Found {len(target_viewers)} current viewers (normal path).",
+                            )
+                        else:
+                            # single-choice fallback
+                            def pick_by_status(desired: str):
+                                cands = [v for v in verified if v["status"] == desired]
+                                return (
+                                    max(cands, key=lambda v: v["total"])
+                                    if cands
+                                    else None
+                                )
+
+                            choice = None
+                            if rk_pick_mode == "current":
+                                choice = (
+                                    pick_by_status("current")
+                                    or pick_by_status("unknown")
+                                    or pick_by_status("upcoming")
+                                )
+                            elif rk_pick_mode == "upcoming":
+                                upcoming = [
+                                    v for v in verified if v["status"] == "upcoming"
+                                ]
+                                if upcoming and any(v["start"] for v in upcoming):
+                                    upcoming.sort(
+                                        key=lambda v: (
+                                            v["start"] or datetime.date.max,
+                                            -v["total"],
+                                        )
+                                    )
+                                    choice = upcoming[0]
+                                else:
+                                    choice = pick_by_status(
+                                        "upcoming"
+                                    ) or pick_by_status("current")
+                            else:  # latest
+                                verified.sort(
+                                    key=lambda v: (
+                                        int(
+                                            re.search(
+                                                r"/prospekt-(\d+)-0", v["href"]
+                                            ).group(1)
+                                        ),
+                                        v["total"],
+                                    ),
+                                    reverse=True,
+                                )
+                                choice = verified[0]
+                            best_href = choice["href"] if choice else top[0][1]
+                            self._log("INFO", "Redirecting to viewer:", best_href)
+                            baseurl = best_href
+                            resolved_slug = self.viewer_slug(best_href)
+                            target_viewers = [best_href]
                 finally:
                     tmp_driver.quit()
             except Exception as e:
@@ -1095,278 +1145,262 @@ class Command(BaseCommand):
             filename = f"{filename_prefix}_KW{iso_week:02d}.pdf"
             if multiple:
                 filename = f"{filename_prefix}_KW{iso_week:02d}_{viewer_id}.pdf"
-                title = f"{market.replace('_',' ').upper()} – {slug} – {today:%Y-%m-%d}"
-                self._log(
-                    "DBG",
-                    f"Model filename: {filename} | title: {title} | market: {market}",
-                )
-                handzettel = Handzettel(supermarkt=market, titel=title)
-                handzettel.datei.save(filename, ContentFile(pdf.read()))
-                handzettel.save()
-                self._log("INFO", f"PDF saved to model as '{filename}'.")
+            title = f"{market.replace('_',' ').upper()} – {slug} – {today:%Y-%m-%d}"
+            self._log(
+                "DBG", f"Model filename: {filename} | title: {title} | market: {market}"
+            )
+            handzettel = Handzettel(supermarkt=market, titel=title)
+            handzettel.datei.save(filename, ContentFile(pdf.read()))
+            handzettel.save()
+            self._log("INFO", f"PDF saved to model as '{filename}'.")
 
-                # Azure SharePoint upload
-                self._log("INFO", "Uploading PDF to SharePoint…")
+            # Azure SharePoint upload
+            self._log("INFO", "Uploading PDF to SharePoint…")
 
-                client_id = os.getenv("AZURE_CLIENT_ID")
-                client_secret = os.getenv("AZURE_CLIENT_SECRET")
-                tenant_id = os.getenv("AZURE_TENANT_ID")
-                sharepoint_site = os.getenv("SHAREPOINT_SITE")
-                sharepoint_folder = os.getenv("SHAREPOINT_FOLDER")
-                sharepoint_drive_id = os.getenv("SHAREPOINT_DRIVE_ID")
+            client_id = os.getenv("AZURE_CLIENT_ID")
+            client_secret = os.getenv("AZURE_CLIENT_SECRET")
+            tenant_id = os.getenv("AZURE_TENANT_ID")
+            sharepoint_site = os.getenv("SHAREPOINT_SITE")
+            sharepoint_folder = os.getenv("SHAREPOINT_FOLDER")
+            sharepoint_drive_id = os.getenv("SHAREPOINT_DRIVE_ID")
 
-                self._log(
-                    "DBG",
-                    "SITE=",
+            self._log(
+                "DBG",
+                "SITE=",
+                sharepoint_site,
+                " | FOLDER=",
+                sharepoint_folder,
+                " | DRIVE_ID=",
+                sharepoint_drive_id or "(auto)",
+            )
+
+            def die(msg, *extra):
+                print("ERROR", msg, *extra)
+                return
+
+            if not all(
+                [
+                    client_id,
+                    client_secret,
+                    tenant_id,
                     sharepoint_site,
-                    " | FOLDER=",
                     sharepoint_folder,
-                    " | DRIVE_ID=",
-                    sharepoint_drive_id or "(auto)",
+                ]
+            ):
+                die("ERROR: SharePoint/Azure configuration missing!")
+                continue
+
+            try:
+                app = msal.ConfidentialClientApplication(
+                    client_id,
+                    authority=f"https://login.microsoftonline.com/{tenant_id}",
+                    client_credential=client_secret,
                 )
-
-                def die(msg, *extra):
-                    print("ERROR", msg, *extra)
-                    return
-
-                if not all(
-                    [
-                        client_id,
-                        client_secret,
-                        tenant_id,
-                        sharepoint_site,
-                        sharepoint_folder,
-                    ]
-                ):
-                    die("ERROR: SharePoint/Azure configuration missing!")
-                    continue
-
-                try:
-                    app = msal.ConfidentialClientApplication(
-                        client_id,
-                        authority=f"https://login.microsoftonline.com/{tenant_id}",
-                        client_credential=client_secret,
+                token_result = app.acquire_token_for_client(
+                    scopes=["https://graph.microsoft.com/.default"]
+                )
+                if "access_token" not in token_result:
+                    die(
+                        "ERROR: Could not get access token:",
+                        token_result.get("error_description"),
+                        token_result,
                     )
-                    token_result = app.acquire_token_for_client(
-                        scopes=["https://graph.microsoft.com/.default"]
-                    )
-                    if "access_token" not in token_result:
-                        die(
-                            "ERROR: Could not get access token:",
-                            token_result.get("error_description"),
-                            token_result,
-                        )
-                        continue
-                    token = token_result["access_token"]
-                    headers = {"Authorization": f"Bearer {token}"}
-                    self._log("INFO", "OK: Got access token")
-                except Exception as e:
-                    die("MSAL token error", e)
                     continue
+                token = token_result["access_token"]
+                headers = {"Authorization": f"Bearer {token}"}
+                self._log("INFO", "OK: Got access token")
+            except Exception as e:
+                die("MSAL token error", e)
+                continue
 
-                try:
-                    site_info = requests.get(
-                        f"https://graph.microsoft.com/v1.0/sites/{sharepoint_site}",
+            try:
+                site_info = requests.get(
+                    f"https://graph.microsoft.com/v1.0/sites/{sharepoint_site}",
+                    headers=headers,
+                )
+                self._log("DBG", "GET site status:", site_info.status_code)
+                if site_info.status_code != 200:
+                    print("GET site body:", site_info.text[:800])
+                    die(
+                        "cannot read site.Check sharepoint site and permissions",
+                        site_info.text,
+                    )
+                    continue
+                site_json = site_info.json()
+                site_id = site_json.get("id")
+                self._log("INFO", "OK site id =", site_id)
+                if not site_id:
+                    die("site ID missing in response", site_json)
+                    continue
+            except Exception as e:
+                die("site lookup failed", e)
+                continue
+
+            def _norm(name: str) -> str:
+                return (name or "").lower().replace(" ", "").replace("_", "")
+
+            try:
+                if sharepoint_drive_id:
+                    drive_id = sharepoint_drive_id.strip()
+                    self._log("INFO", "OK: Using drive by ID:", drive_id)
+                else:
+                    drives_resp = requests.get(
+                        f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives",
                         headers=headers,
                     )
-                    self._log("DBG", "GET site status:", site_info.status_code)
-                    if site_info.status_code != 200:
-                        print("GET site body:", site_info.text[:800])
+                    self._log("DBG", "GET drives status:", drives_resp.status_code)
+                    if drives_resp.status_code != 200:
                         die(
-                            "cannot read site.Check sharepoint site and permissions",
-                            site_info.text,
+                            "cannot list drives. Permissions missing!", drives_resp.text
                         )
                         continue
-                    site_json = site_info.json()
-                    site_id = site_json.get("id")
-                    self._log("INFO", "OK site id =", site_id)
-                    if not site_id:
-                        die("site ID missing in response", site_json)
+                    drives = drives_resp.json().get("value", [])
+                    self._log(
+                        "DBG",
+                        "Available drives:",
+                        [(d.get("name"), d.get("id")) for d in drives],
+                    )
+                    if not drives:
+                        die("No drives found on the site.")
                         continue
-                except Exception as e:
-                    die("site lookup failed", e)
-                    continue
 
-                def _norm(name: str) -> str:
-                    return (name or "").lower().replace(" ", "").replace("_", "")
+                    library_name = sharepoint_folder.split("/")[0].strip()
+                    drive = (
+                        next((d for d in drives if d.get("name") == library_name), None)
+                        or next(
+                            (
+                                d
+                                for d in drives
+                                if (d.get("name") or "").lower() == library_name.lower()
+                            ),
+                            None,
+                        )
+                        or next(
+                            (
+                                d
+                                for d in drives
+                                if _norm(d.get("name")) == _norm(library_name)
+                            ),
+                            None,
+                        )
+                    )
+                    if not drive:
+                        print(
+                            f"WARN: Library '{library_name}' not found. Using first drive as fallback."
+                        )
+                        drive = drives[0]
 
-                try:
-                    if sharepoint_drive_id:
-                        drive_id = sharepoint_drive_id.strip()
-                        self._log("INFO", "OK: Using drive by ID:", drive_id)
-                    else:
-                        drives_resp = requests.get(
-                            f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives",
-                            headers=headers,
-                        )
-                        self._log("DBG", "GET drives status:", drives_resp.status_code)
-                        if drives_resp.status_code != 200:
-                            die(
-                                "cannot list drives. Permissions missing!",
-                                drives_resp.text,
-                            )
-                            continue
-                        drives = drives_resp.json().get("value", [])
-                        self._log(
-                            "DBG",
-                            "Available drives:",
-                            [(d.get("name"), d.get("id")) for d in drives],
-                        )
-                        if not drives:
-                            die("No drives found on the site.")
-                            continue
+                    drive_id = drive["id"]
+                    self._log("INFO", "OK: Using drive:", drive.get("name"), drive_id)
+            except Exception as e:
+                die("Drive lookup failed", e)
+                continue
 
-                        library_name = sharepoint_folder.split("/")[0].strip()
-                        drive = (
-                            next(
-                                (d for d in drives if d.get("name") == library_name),
-                                None,
-                            )
-                            or next(
-                                (
-                                    d
-                                    for d in drives
-                                    if (d.get("name") or "").lower()
-                                    == library_name.lower()
-                                ),
-                                None,
-                            )
-                            or next(
-                                (
-                                    d
-                                    for d in drives
-                                    if _norm(d.get("name")) == _norm(library_name)
-                                ),
-                                None,
-                            )
+            def ensure_folder_path(drive_id: str, folder_path: str):
+                parts = [p for p in folder_path.split("/") if p.strip()]
+                parent_path = ""
+                for part in parts:
+                    parent_path = f"{parent_path}/{part}" if parent_path else part
+                    r = requests.get(
+                        f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{parent_path}",
+                        headers=headers,
+                    )
+                    self._log("DBG", "Check folder", parent_path, "->", r.status_code)
+                    if r.status_code == 404:
+                        parent_parent = (
+                            f"/{parent_path.rsplit('/',1)[0]}"
+                            if "/" in parent_path
+                            else ""
                         )
-                        if not drive:
-                            print(
-                                f"WARN: Library '{library_name}' not found. Using first drive as fallback."
-                            )
-                            drive = drives[0]
-
-                        drive_id = drive["id"]
-                        self._log(
-                            "INFO", "OK: Using drive:", drive.get("name"), drive_id
+                        create_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:{parent_parent}:/children"
+                        cr = requests.post(
+                            create_url,
+                            headers={**headers, "Content-Type": "application/json"},
+                            json={
+                                "name": part,
+                                "folder": {},
+                                "@microsoft.graph.conflictBehavior": "rename",
+                            },
                         )
-                except Exception as e:
-                    die("Drive lookup failed", e)
-                    continue
-
-                def ensure_folder_path(drive_id: str, folder_path: str):
-                    parts = [p for p in folder_path.split("/") if p.strip()]
-                    parent_path = ""
-                    for part in parts:
-                        parent_path = f"{parent_path}/{part}" if parent_path else part
-                        r = requests.get(
-                            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{parent_path}",
-                            headers=headers,
-                        )
-                        self._log(
-                            "DBG", "Check folder", parent_path, "->", r.status_code
-                        )
-                        if r.status_code == 404:
-                            parent_parent = (
-                                f"/{parent_path.rsplit('/',1)[0]}"
-                                if "/" in parent_path
-                                else ""
-                            )
-                            create_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:{parent_parent}:/children"
-                            cr = requests.post(
-                                create_url,
-                                headers={**headers, "Content-Type": "application/json"},
-                                json={
-                                    "name": part,
-                                    "folder": {},
-                                    "@microsoft.graph.conflictBehavior": "rename",
-                                },
-                            )
-                            if cr.status_code not in (200, 201):
-                                raise RuntimeError(
-                                    f"Failed to create '{part}': {cr.status_code} {cr.text}"
-                                )
-                        elif r.status_code != 200:
+                        if cr.status_code not in (200, 201):
                             raise RuntimeError(
-                                f"Folder check failed for '{parent_path}': {r.status_code} {r.text}"
+                                f"Failed to create '{part}': {cr.status_code} {cr.text}"
                             )
-
-                subpath = "/".join(
-                    sharepoint_folder.split("/")[1:]
-                )  # strip the library ("Documents")
-                year_folder = f"{today.year}"
-                brand_folder = self.brand_folder_name(market)
-                nested_subpath = f"{subpath}/{brand_folder}/{year_folder}"
-
-                self._log(
-                    "INFO",
-                    "Ensuring nested path (drive root-relative):",
-                    nested_subpath,
-                )
-
-                try:
-                    if nested_subpath:
-                        ensure_folder_path(drive_id, nested_subpath)
-                        self._log("INFO", "OK: Folder path ensured:", nested_subpath)
-                except Exception as e:
-                    die("Creating/checking folder path failed", e)
-                    continue
-
-                try:
-                    upload_path = "/".join([nested_subpath, filename])
-
-                    self._log("INFO", "Uploading to path:", upload_path)
-                    upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
-                    with open(handzettel.datei.path, "rb") as f:
-                        resp = requests.put(upload_url, headers=headers, data=f)
-                    self._log("INFO", "PUT upload status:", resp.status_code)
-
-                    data = None
-                    try:
-                        data = resp.json()
-                    except Exception:
-                        pass
-
-                    if resp.status_code in (200, 201):
-                        weburl = (data or {}).get("webUrl")
-                        if not weburl:
-                            meta = requests.get(
-                                f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}",
-                                headers=headers,
-                            )
-                            if meta.status_code == 200:
-                                weburl = meta.json().get("webUrl")
-                        self._log(
-                            "INFO", "SharePoint webUrl:", weburl or "(not returned)"
+                    elif r.status_code != 200:
+                        raise RuntimeError(
+                            f"Folder check failed for '{parent_path}': {r.status_code} {r.text}"
                         )
-                        self._log("INFO", "PDF successfully uploaded to SharePoint!")
-                    else:
-                        print("Response body (truncated):", (resp.text or "")[:500])
-                        die("Error uploading to SharePoint:", resp.status_code)
-                        continue
-                except Exception as e:
-                    die("Upload exception", e)
-                    continue
 
-                def search_in_drive(name: str):
-                    try:
-                        q = urllib.parse.quote(name)
-                        r = requests.get(
-                            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{q}')",
+            subpath = "/".join(
+                sharepoint_folder.split("/")[1:]
+            )  # strip the library ("Documents")
+            year_folder = f"{today.year}"
+            brand_folder = self.brand_folder_name(market)
+            nested_subpath = f"{subpath}/{brand_folder}/{year_folder}"
+
+            self._log(
+                "INFO", "Ensuring nested path (drive root-relative):", nested_subpath
+            )
+
+            try:
+                if nested_subpath:
+                    ensure_folder_path(drive_id, nested_subpath)
+                    self._log("INFO", "OK: Folder path ensured:", nested_subpath)
+            except Exception as e:
+                die("Creating/checking folder path failed", e)
+                continue
+
+            try:
+                upload_path = "/".join([nested_subpath, filename])
+
+                self._log("INFO", "Uploading to path:", upload_path)
+                upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
+                with open(handzettel.datei.path, "rb") as f:
+                    resp = requests.put(upload_url, headers=headers, data=f)
+                self._log("INFO", "PUT upload status:", resp.status_code)
+
+                data = None
+                try:
+                    data = resp.json()
+                except Exception:
+                    pass
+
+                if resp.status_code in (200, 201):
+                    weburl = (data or {}).get("webUrl")
+                    if not weburl:
+                        meta = requests.get(
+                            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}",
                             headers=headers,
                         )
-                        if r.status_code == 200:
-                            hits = r.json().get("value", [])
-                            self._log("INFO", f"Search hits for '{name}':", len(hits))
-                            for it in hits[:5]:
-                                print(
-                                    "-", it.get("name"), "| webUrl:", it.get("webUrl")
-                                )
-                        else:
-                            print("Search failed:", r.status_code, r.text[:400])
-                    except Exception as e:
-                        print("Search exception:", e)
+                        if meta.status_code == 200:
+                            weburl = meta.json().get("webUrl")
+                    self._log("INFO", "SharePoint webUrl:", weburl or "(not returned)")
+                    self._log("INFO", "PDF successfully uploaded to SharePoint!")
+                else:
+                    print("Response body (truncated):", (resp.text or "")[:500])
+                    die("Error uploading to SharePoint:", resp.status_code)
+                    continue
+            except Exception as e:
+                die("Upload exception", e)
+                continue
 
-                search_in_drive(filename)
+            def search_in_drive(name: str):
+                try:
+                    q = urllib.parse.quote(name)
+                    r = requests.get(
+                        f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{q}')",
+                        headers=headers,
+                    )
+                    if r.status_code == 200:
+                        hits = r.json().get("value", [])
+                        self._log("INFO", f"Search hits for '{name}':", len(hits))
+                        for it in hits[:5]:
+                            print("-", it.get("name"), "| webUrl:", it.get("webUrl"))
+                    else:
+                        print("Search failed:", r.status_code, r.text[:400])
+                except Exception as e:
+                    print("Search exception:", e)
 
-            self._log("INFO", "DONE.")
+            search_in_drive(filename)
+
+        self._log("INFO", "DONE.")
