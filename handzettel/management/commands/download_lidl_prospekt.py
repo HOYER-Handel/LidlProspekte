@@ -642,265 +642,228 @@ class Command(BaseCommand):
     # main flow
     # main flow
 
+    def handle(self, *args, **opts):
+        # reads CLI options
+        baseurl = opts["baseurl"]
+        pages = opts["pages"]
+        filename_mode = opts.get("filename_mode", "auto")
+        rk_pick_mode = opts.get("rk_pick", "current")
 
-def handle(self, *args, **opts):
-    # reads CLI options
-    baseurl = opts["baseurl"]
-    pages = opts["pages"]
-    filename_mode = opts.get("filename_mode", "auto")
-    rk_pick_mode = opts.get("rk_pick", "current")
+        self._log(
+            "INFO",
+            "START job baseurl=",
+            baseurl,
+            "pages=",
+            pages,
+            "filename_mode=",
+            filename_mode,
+        )
+        original_input = baseurl
+        u_low_in = original_input.lower()
 
-    self._log(
-        "INFO",
-        "START job baseurl=",
-        baseurl,
-        "pages=",
-        pages,
-        "filename_mode=",
-        filename_mode,
-    )
-    original_input = baseurl
-    u_low_in = original_input.lower()
-
-    retailer_hint = (
-        "lidl"
-        if "lidl" in u_low_in
-        else (
-            "aldi"
-            if "aldi" in u_low_in
+        retailer_hint = (
+            "lidl"
+            if "lidl" in u_low_in
             else (
-                "kaufland"
-                if "kaufland" in u_low_in
-                else ("edeka" if "edeka" in u_low_in else "")
+                "aldi"
+                if "aldi" in u_low_in
+                else (
+                    "kaufland"
+                    if "kaufland" in u_low_in
+                    else ("edeka" if "edeka" in u_low_in else "")
+                )
             )
         )
-    )
-    self._log("DBG", "retailer_hint:", retailer_hint)
+        self._log("DBG", "retailer_hint:", retailer_hint)
 
-    # --- rabatt-kompass OVERVIEW → resolve to specific viewer(s) ---
-    resolved_slug = None
-    if "rabatt-kompass.de" in baseurl and "/prospekt-" not in baseurl:
-        target_viewers: list[str] = []
-        try:
-            tmp_driver = webdriver.Chrome(options=self._configure_chrome_options())
-            self._apply_basic_stealth(tmp_driver)
+        # --- rabatt-kompass OVERVIEW → resolve to specific viewer(s) ---
+        resolved_slug = None
+        if "rabatt-kompass.de" in baseurl and "/prospekt-" not in baseurl:
+            target_viewers: list[str] = []
             try:
-                tmp_driver.get(baseurl)
-                self._wait_cloudflare(tmp_driver)
+                tmp_driver = webdriver.Chrome(options=self._configure_chrome_options())
+                self._apply_basic_stealth(tmp_driver)
                 try:
-                    WebDriverWait(tmp_driver, 3).until(
-                        EC.element_to_be_clickable(
-                            (By.ID, "onetrust-accept-btn-handler")
-                        )
-                    ).click()
-                    time.sleep(0.2)
-                except Exception:
-                    pass
-
-                links = tmp_driver.find_elements(
-                    By.CSS_SELECTOR, "a[href*='/prospekt-'][href$='-0']"
-                )
-                href_elems = []
-                seen = set()
-                for a in links:
-                    h = a.get_attribute("href") or ""
-                    if h and h not in seen:
-                        href_elems.append(a)
-                        seen.add(h)
-                self._log("DBG", f"RK overview → found viewer links: {len(href_elems)}")
-
-                overview_scored = []
-                for a in href_elems:
-                    sc, href, why = self._score_rk_viewer_link(
-                        a, retailer_hint, rk_pick_mode
-                    )
-                    overview_scored.append((sc, href, why))
-                overview_scored.sort(key=lambda t: t[0], reverse=True)
-
-                top = overview_scored[:6]
-                if not top:
-                    # Regex fallback when DOM had no anchors
-                    html = tmp_driver.page_source or ""
-                    raw = re.findall(
-                        r'https://rabatt-kompass\.de/[^"\'\s]*/prospekt-\d+-0', html
-                    )
-                    raw = list(dict.fromkeys(raw))
-                    self._log("DBG", f"RK overview regex → {len(raw)} candidates")
-
-                    verified = []
-                    for href in raw[:12]:
-                        det = self._inspect_viewer_details(tmp_driver, href)
-                        verified.append(
-                            {
-                                "href": href,
-                                "total": det["bonus"],
-                                "status": det["status"],
-                                "start": det["start"],
-                                "end": det["end"],
-                                "why": det["reason"],
-                            }
-                        )
-
-                    # === dates-only selection (regex path) ===
-                    choice = self._pick_by_dates_only(verified, rk_pick_mode)
-                    if choice:
-                        baseurl = choice["href"]
-                        resolved_slug = self.viewer_slug(baseurl)
-                        target_viewers = [baseurl]
-                        self._log(
-                            "INFO",
-                            "Redirecting to viewer (regex fallback):",
-                            baseurl,
-                        )
-                else:
-                    # Have DOM 'top' candidates → verify
-                    dump = json.dumps(
-                        [[sc, href] for sc, href, _ in top],
-                        indent=2,
-                        ensure_ascii=False,
-                    )
-                    self._log("DBG", "RK candidates (top 6):", f"\n{dump}")
-
-                    verified = []
-                    for sc, href, why in top:
-                        detail = self._inspect_viewer_details(tmp_driver, href)
-                        total = sc + detail["bonus"]
-                        verified.append(
-                            {
-                                "href": href,
-                                "overview_score": sc,
-                                "viewer_bonus": detail["bonus"],
-                                "total": total,
-                                "status": detail["status"],
-                                "why": why + " | " + detail["reason"],
-                                "start": detail["start"],
-                                "end": detail["end"],
-                            }
-                        )
-
-                    # === dates-only selection (normal DOM path) ===
-                    choice = self._pick_by_dates_only(verified, rk_pick_mode)
-                    best_href = choice["href"] if choice else top[0][1]
-                    self._log("INFO", "Redirecting to viewer:", best_href)
-                    baseurl = best_href
-                    resolved_slug = self.viewer_slug(best_href)
-                    target_viewers = [best_href]
-            finally:
-                tmp_driver.quit()
-        except Exception as e:
-            self._log("DBG", "overview resolver error:", e)
-
-    # Default list if overview didn't populate
-    if not locals().get("target_viewers"):
-        target_viewers = [baseurl]
-    multiple = len(target_viewers) > 1
-
-    # === Process each selected viewer (download → PDF → upload) ===
-    for baseurl in target_viewers:
-        self._log("INFO", "Processing viewer:", baseurl)
-
-        #  Start headless Chrome (main) for this viewer
-        chrome_options = self._configure_chrome_options()
-        chromedriver_path = os.getenv("CHROMEDRIVER", "").strip()
-        try:
-            if chromedriver_path:
-                driver = webdriver.Chrome(
-                    service=Service(chromedriver_path), options=chrome_options
-                )
-            else:
-                driver = webdriver.Chrome(options=chrome_options)
-                self._log("DBG", "Launched Chrome via Selenium Manager fallback.")
-        except Exception:
-            driver = webdriver.Chrome(options=chrome_options)
-            self._log("DBG", "Launched Chrome via Selenium Manager fallback.")
-
-        self._apply_basic_stealth(driver)
-
-        images: list[Image.Image] = []
-        slug_for_filename: str | None = None
-        prev_img_url = None
-        last_fp = None
-
-        # loop through pages (site-aware)
-        try:
-            if "rabatt-kompass.de" in baseurl:
-                driver.get(
-                    baseurl if "/prospekt-" in baseurl else self.page_url(baseurl, 1)
-                )
-                self._wait_cloudflare(driver)
-                self.accept_cookies_if_present(driver)
-                self._wait_first_page_ready(driver)
-
-                self._switch_to_viewer_context(driver)
-
-                viewer_base = (driver.current_url or baseurl).split("#", 1)[0]
-                last_fp = None
-
-                for i in range(1, pages + 1):
-                    target = f"{viewer_base}#page_{i}"
-                    self._log("INFO", f"[RK] go page {i}: {target}")
-                    driver.get(target)
-                    self._wait_cloudflare(driver)
-                    self._switch_to_viewer_context(driver)
-
+                    tmp_driver.get(baseurl)
+                    self._wait_cloudflare(tmp_driver)
                     try:
-                        WebDriverWait(driver, 12).until(
-                            lambda d: d.execute_script(
-                                "return !!document.querySelector(\"img[src*='/public/gimg/']\");"
+                        WebDriverWait(tmp_driver, 3).until(
+                            EC.element_to_be_clickable(
+                                (By.ID, "onetrust-accept-btn-handler")
                             )
-                        )
+                        ).click()
+                        time.sleep(0.2)
                     except Exception:
                         pass
 
-                    img_url = self.pick_image_url(driver)
+                    links = tmp_driver.find_elements(
+                        By.CSS_SELECTOR, "a[href*='/prospekt-'][href$='-0']"
+                    )
+                    href_elems = []
+                    seen = set()
+                    for a in links:
+                        h = a.get_attribute("href") or ""
+                        if h and h not in seen:
+                            href_elems.append(a)
+                            seen.add(h)
+                    self._log(
+                        "DBG", f"RK overview → found viewer links: {len(href_elems)}"
+                    )
 
-                    if not img_url:
-                        self._log("INFO", "No direct image; trying screenshot…")
-                        png = self._capture_best_visual(driver)
-                        if not png:
-                            if i > 1:
-                                self._log(
-                                    "INFO", f"Reached end at page {i-1}. Stopping."
-                                )
-                                break
-                            self._log("INFO", "No visual on page 1. Stopping.")
-                            break
-                        try:
-                            img = Image.open(BytesIO(png)).convert("RGB")
-                        except Exception:
-                            self._log("INFO", "Screenshot decode failed.")
-                            break
-                    else:
-                        hi_url = (
-                            re.sub(
-                                r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
-                                r"-2000-\2.\3",
-                                img_url,
-                                flags=re.I,
-                            )
-                            if "/public/gimg/" in img_url
-                            else img_url
+                    overview_scored = []
+                    for a in href_elems:
+                        sc, href, why = self._score_rk_viewer_link(
+                            a, retailer_hint, rk_pick_mode
                         )
+                        overview_scored.append((sc, href, why))
+                    overview_scored.sort(key=lambda t: t[0], reverse=True)
 
-                        img = None
-                        try:
-                            r = requests.get(hi_url, timeout=20)
-                            if r.status_code == 200 and r.content:
-                                img = Image.open(BytesIO(r.content)).convert("RGB")
-                        except Exception as e:
-                            self._log("DBG", "Direct GET failed:", e)
+                    top = overview_scored[:6]
+                    if not top:
+                        # Regex fallback when DOM had no anchors
+                        html = tmp_driver.page_source or ""
+                        raw = re.findall(
+                            r'https://rabatt-kompass\.de/[^"\'\s]*/prospekt-\d+-0', html
+                        )
+                        raw = list(dict.fromkeys(raw))
+                        self._log("DBG", f"RK overview regex → {len(raw)} candidates")
 
-                        if img is None:
+                        verified = []
+                        for href in raw[:12]:
+                            det = self._inspect_viewer_details(tmp_driver, href)
+                            verified.append(
+                                {
+                                    "href": href,
+                                    "total": det["bonus"],
+                                    "status": det["status"],
+                                    "start": det["start"],
+                                    "end": det["end"],
+                                    "why": det["reason"],
+                                }
+                            )
+
+                        # === dates-only selection (regex path) ===
+                        choice = self._pick_by_dates_only(verified, rk_pick_mode)
+                        if choice:
+                            baseurl = choice["href"]
+                            resolved_slug = self.viewer_slug(baseurl)
+                            target_viewers = [baseurl]
                             self._log(
                                 "INFO",
-                                "Direct download failed; using screenshot fallback…",
+                                "Redirecting to viewer (regex fallback):",
+                                baseurl,
                             )
+                    else:
+                        # Have DOM 'top' candidates → verify
+                        dump = json.dumps(
+                            [[sc, href] for sc, href, _ in top],
+                            indent=2,
+                            ensure_ascii=False,
+                        )
+                        self._log("DBG", "RK candidates (top 6):", f"\n{dump}")
+
+                        verified = []
+                        for sc, href, why in top:
+                            detail = self._inspect_viewer_details(tmp_driver, href)
+                            total = sc + detail["bonus"]
+                            verified.append(
+                                {
+                                    "href": href,
+                                    "overview_score": sc,
+                                    "viewer_bonus": detail["bonus"],
+                                    "total": total,
+                                    "status": detail["status"],
+                                    "why": why + " | " + detail["reason"],
+                                    "start": detail["start"],
+                                    "end": detail["end"],
+                                }
+                            )
+
+                        # === dates-only selection (normal DOM path) ===
+                        choice = self._pick_by_dates_only(verified, rk_pick_mode)
+                        best_href = choice["href"] if choice else top[0][1]
+                        self._log("INFO", "Redirecting to viewer:", best_href)
+                        baseurl = best_href
+                        resolved_slug = self.viewer_slug(best_href)
+                        target_viewers = [best_href]
+                finally:
+                    tmp_driver.quit()
+            except Exception as e:
+                self._log("DBG", "overview resolver error:", e)
+
+        # Default list if overview didn't populate
+        if not locals().get("target_viewers"):
+            target_viewers = [baseurl]
+        multiple = len(target_viewers) > 1
+
+        # === Process each selected viewer (download → PDF → upload) ===
+        for baseurl in target_viewers:
+            self._log("INFO", "Processing viewer:", baseurl)
+
+            #  Start headless Chrome (main) for this viewer
+            chrome_options = self._configure_chrome_options()
+            chromedriver_path = os.getenv("CHROMEDRIVER", "").strip()
+            try:
+                if chromedriver_path:
+                    driver = webdriver.Chrome(
+                        service=Service(chromedriver_path), options=chrome_options
+                    )
+                else:
+                    driver = webdriver.Chrome(options=chrome_options)
+                    self._log("DBG", "Launched Chrome via Selenium Manager fallback.")
+            except Exception:
+                driver = webdriver.Chrome(options=chrome_options)
+                self._log("DBG", "Launched Chrome via Selenium Manager fallback.")
+
+            self._apply_basic_stealth(driver)
+
+            images: list[Image.Image] = []
+            slug_for_filename: str | None = None
+            prev_img_url = None
+            last_fp = None
+
+            # loop through pages (site-aware)
+            try:
+                if "rabatt-kompass.de" in baseurl:
+                    driver.get(
+                        baseurl
+                        if "/prospekt-" in baseurl
+                        else self.page_url(baseurl, 1)
+                    )
+                    self._wait_cloudflare(driver)
+                    self.accept_cookies_if_present(driver)
+                    self._wait_first_page_ready(driver)
+
+                    self._switch_to_viewer_context(driver)
+
+                    viewer_base = (driver.current_url or baseurl).split("#", 1)[0]
+                    last_fp = None
+
+                    for i in range(1, pages + 1):
+                        target = f"{viewer_base}#page_{i}"
+                        self._log("INFO", f"[RK] go page {i}: {target}")
+                        driver.get(target)
+                        self._wait_cloudflare(driver)
+                        self._switch_to_viewer_context(driver)
+
+                        try:
+                            WebDriverWait(driver, 12).until(
+                                lambda d: d.execute_script(
+                                    "return !!document.querySelector(\"img[src*='/public/gimg/']\");"
+                                )
+                            )
+                        except Exception:
+                            pass
+
+                        img_url = self.pick_image_url(driver)
+
+                        if not img_url:
+                            self._log("INFO", "No direct image; trying screenshot…")
                             png = self._capture_best_visual(driver)
                             if not png:
                                 if i > 1:
                                     self._log(
-                                        "INFO",
-                                        f"Reached end at page {i-1}. Stopping.",
+                                        "INFO", f"Reached end at page {i-1}. Stopping."
                                     )
                                     break
                                 self._log("INFO", "No visual on page 1. Stopping.")
@@ -910,430 +873,500 @@ def handle(self, *args, **opts):
                             except Exception:
                                 self._log("INFO", "Screenshot decode failed.")
                                 break
-
-                    fp = self._img_dhash(img)
-                    if i > 1 and last_fp is not None and self._ham(fp, last_fp) <= 2:
-                        self._log("INFO", f"Visually same as page {i-1}. Stopping.")
-                        break
-                    last_fp = fp
-
-                    images.append(img)
-                    self._log("INFO", f"Page {i}: added. Total now {len(images)}")
-
-            else:
-                for i in range(1, pages + 1):
-                    url = self.page_url(baseurl, i)
-                    self._log("INFO", f"Loading page {i}:", url)
-                    driver.get(url)
-                    self._wait_cloudflare(driver)
-                    self._log(
-                        "DBG", "current_url after GET:", driver.current_url or url
-                    )
-
-                    if i == 1:
-                        self.accept_cookies_if_present(driver)
-                        self._wait_first_page_ready(driver)
-
-                        current = driver.current_url or baseurl
-                        candidate_viewer = resolved_slug or self.viewer_slug(current)
-                        overview_slug = self.url_slug(original_input)
-                        if filename_mode == "viewer":
-                            slug_for_filename = candidate_viewer or overview_slug
-                        elif filename_mode == "overview":
-                            slug_for_filename = overview_slug
                         else:
-                            slug_for_filename = candidate_viewer or overview_slug
-                        self._log(
-                            "INFO",
-                            "Using slug for filename (mode:",
-                            filename_mode,
-                            "):",
-                            slug_for_filename,
-                        )
+                            hi_url = (
+                                re.sub(
+                                    r"-(\d{3,4})-(\d+)\.(jpe?g|png|webp)$",
+                                    r"-2000-\2.\3",
+                                    img_url,
+                                    flags=re.I,
+                                )
+                                if "/public/gimg/" in img_url
+                                else img_url
+                            )
 
-                    try:
-                        WebDriverWait(driver, 8).until(
-                            EC.presence_of_element_located((By.TAG_NAME, "img"))
-                        )
-                    except Exception:
-                        pass
-                    time.sleep(1.0)
+                            img = None
+                            try:
+                                r = requests.get(hi_url, timeout=20)
+                                if r.status_code == 200 and r.content:
+                                    img = Image.open(BytesIO(r.content)).convert("RGB")
+                            except Exception as e:
+                                self._log("DBG", "Direct GET failed:", e)
 
-                    img_url = self.pick_image_url(driver)
+                            if img is None:
+                                self._log(
+                                    "INFO",
+                                    "Direct download failed; using screenshot fallback…",
+                                )
+                                png = self._capture_best_visual(driver)
+                                if not png:
+                                    if i > 1:
+                                        self._log(
+                                            "INFO",
+                                            f"Reached end at page {i-1}. Stopping.",
+                                        )
+                                        break
+                                    self._log("INFO", "No visual on page 1. Stopping.")
+                                    break
+                                try:
+                                    img = Image.open(BytesIO(png)).convert("RGB")
+                                except Exception:
+                                    self._log("INFO", "Screenshot decode failed.")
+                                    break
 
-                    if not img_url and i == 1:
-                        self._log("INFO", "No image on page 1 yet; retrying…")
-                        time.sleep(1.0)
+                        fp = self._img_dhash(img)
+                        if (
+                            i > 1
+                            and last_fp is not None
+                            and self._ham(fp, last_fp) <= 2
+                        ):
+                            self._log("INFO", f"Visually same as page {i-1}. Stopping.")
+                            break
+                        last_fp = fp
+
+                        images.append(img)
+                        self._log("INFO", f"Page {i}: added. Total now {len(images)}")
+
+                else:
+                    for i in range(1, pages + 1):
+                        url = self.page_url(baseurl, i)
+                        self._log("INFO", f"Loading page {i}:", url)
                         driver.get(url)
                         self._wait_cloudflare(driver)
-                        self._wait_first_page_ready(driver)
-                        img_url = self.pick_image_url(driver)
-
-                    if not img_url:
-                        self._log("INFO", "No image found on this page.")
-                        continue
-
-                    hi_url = (
-                        re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
-                        if "/public/gimg/" in img_url
-                        else img_url
-                    )
-                    self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
-
-                    try:
-                        r = requests.get(hi_url, timeout=20)
                         self._log(
-                            "DBG",
-                            "GET",
-                            hi_url,
-                            "->",
-                            r.status_code,
-                            "lenHdr=",
-                            len(r.content) if r.ok else 0,
+                            "DBG", "current_url after GET:", driver.current_url or url
                         )
-                        if r.status_code == 200 and r.content:
-                            images.append(Image.open(BytesIO(r.content)).convert("RGB"))
-                            md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
-                            self._log(
-                                "DBG",
-                                "Downloaded bytes:",
-                                len(r.content),
-                                "md5=",
-                                md5,
-                            )
-                            self._log(
-                                "INFO",
-                                f"Page {i}: added image. Total now {len(images)}",
-                            )
-                            continue
-                    except Exception as e:
-                        self._log("DBG", "Direct GET failed:", e)
 
-                    self._log("INFO", "Direct download failed; trying visual fallback…")
-                    png_bytes = self._capture_best_visual(driver)
-                    if png_bytes:
-                        try:
-                            images.append(Image.open(BytesIO(png_bytes)).convert("RGB"))
+                        if i == 1:
+                            self.accept_cookies_if_present(driver)
+                            self._wait_first_page_ready(driver)
+
+                            current = driver.current_url or baseurl
+                            candidate_viewer = resolved_slug or self.viewer_slug(
+                                current
+                            )
+                            overview_slug = self.url_slug(original_input)
+                            if filename_mode == "viewer":
+                                slug_for_filename = candidate_viewer or overview_slug
+                            elif filename_mode == "overview":
+                                slug_for_filename = overview_slug
+                            else:
+                                slug_for_filename = candidate_viewer or overview_slug
                             self._log(
                                 "INFO",
-                                f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                                "Using slug for filename (mode:",
+                                filename_mode,
+                                "):",
+                                slug_for_filename,
+                            )
+
+                        try:
+                            WebDriverWait(driver, 8).until(
+                                EC.presence_of_element_located((By.TAG_NAME, "img"))
                             )
                         except Exception:
-                            self._log("INFO", "Could not decode fallback visual.")
-                    else:
-                        self._log("INFO", "No visual content captured on this page.")
-        finally:
-            try:
-                driver.quit()
-                self._log("DBG", "Chrome closed.")
-            except Exception:
-                pass
+                            pass
+                        time.sleep(1.0)
 
-        if not images:
-            self._log("INFO", "No page images found!")
-            continue
+                        img_url = self.pick_image_url(driver)
 
-        # Build PDF
-        pdf = BytesIO()
-        images[0].save(pdf, format="PDF", save_all=True, append_images=images[1:])
-        pdf.seek(0)
-        self._log("INFO", f"PDF built with {len(images)} pages.")
+                        if not img_url and i == 1:
+                            self._log("INFO", "No image on page 1 yet; retrying…")
+                            time.sleep(1.0)
+                            driver.get(url)
+                            self._wait_cloudflare(driver)
+                            self._wait_first_page_ready(driver)
+                            img_url = self.pick_image_url(driver)
 
-        # Save into model Handzettel
-        u = original_input.lower() if original_input else baseurl.lower()
-        market = (
-            "lidl"
-            if "lidl" in u
-            else (
-                "aldi_nord"
-                if ("aldi-nord" in u or "aldi_nord" in u)
-                else (
-                    "aldi_sued"
-                    if ("aldi-sued" in u or "aldi_sued" in u)
-                    else (
-                        "edeka"
-                        if "edeka" in u
-                        else ("kaufland" if "kaufland" in u else "unknown")
-                    )
-                )
-            )
-        )
-        today = datetime.date.today()
-        iso_week = today.isocalendar()[1]
-        slug = slug_for_filename or self.url_slug(baseurl)
-        brand_folder = self.brand_folder_name(market)
-        filename_prefix = {
-            "lidl": "LidlProspekt",
-            "aldi_nord": "AldiNordProspekt",
-            "aldi_sued": "AldiSuedProspekt",
-            "kaufland": "KauflandProspekt",
-            "edeka": "EdekaProspekt",
-        }.get(market, "Prospekt")
+                        if not img_url:
+                            self._log("INFO", "No image found on this page.")
+                            continue
 
-        viewer_id = (
-            (self.viewer_slug(baseurl) or self.url_slug(baseurl))
-            .replace("prospekt-", "")
-            .replace("-0", "")
-        )
-        filename = f"{filename_prefix}_KW{iso_week:02d}.pdf"
-        if multiple:
-            filename = f"{filename_prefix}_KW{iso_week:02d}_{viewer_id}.pdf"
-            title = f"{market.replace('_',' ').upper()} – {slug} – {today:%Y-%m-%d}"
-            self._log(
-                "DBG", f"Model filename: {filename} | title: {title} | market: {market}"
-            )
-            handzettel = Handzettel(supermarkt=market, titel=title)
-            handzettel.datei.save(filename, ContentFile(pdf.read()))
-            handzettel.save()
-            self._log("INFO", f"PDF saved to model as '{filename}'.")
-
-            # Azure SharePoint upload
-            self._log("INFO", "Uploading PDF to SharePoint…")
-
-            client_id = os.getenv("AZURE_CLIENT_ID")
-            client_secret = os.getenv("AZURE_CLIENT_SECRET")
-            tenant_id = os.getenv("AZURE_TENANT_ID")
-            sharepoint_site = os.getenv("SHAREPOINT_SITE")
-            sharepoint_folder = os.getenv("SHAREPOINT_FOLDER")
-            sharepoint_drive_id = os.getenv("SHAREPOINT_DRIVE_ID")
-
-            self._log(
-                "DBG",
-                "SITE=",
-                sharepoint_site,
-                " | FOLDER=",
-                sharepoint_folder,
-                " | DRIVE_ID=",
-                sharepoint_drive_id or "(auto)",
-            )
-
-            def die(msg, *extra):
-                print("ERROR", msg, *extra)
-                return
-
-            if not all(
-                [
-                    client_id,
-                    client_secret,
-                    tenant_id,
-                    sharepoint_site,
-                    sharepoint_folder,
-                ]
-            ):
-                die("ERROR: SharePoint/Azure configuration missing!")
-                continue
-
-            try:
-                app = msal.ConfidentialClientApplication(
-                    client_id,
-                    authority=f"https://login.microsoftonline.com/{tenant_id}",
-                    client_credential=client_secret,
-                )
-                token_result = app.acquire_token_for_client(
-                    scopes=["https://graph.microsoft.com/.default"]
-                )
-                if "access_token" not in token_result:
-                    die(
-                        "ERROR: Could not get access token:",
-                        token_result.get("error_description"),
-                        token_result,
-                    )
-                    continue
-                token = token_result["access_token"]
-                headers = {"Authorization": f"Bearer {token}"}
-                self._log("INFO", "OK: Got access token")
-            except Exception as e:
-                die("MSAL token error", e)
-                continue
-
-            try:
-                site_info = requests.get(
-                    f"https://graph.microsoft.com/v1.0/sites/{sharepoint_site}",
-                    headers=headers,
-                )
-                self._log("DBG", "GET site status:", site_info.status_code)
-                if site_info.status_code != 200:
-                    print("GET site body:", site_info.text[:800])
-                    die(
-                        "cannot read site.Check sharepoint site and permissions",
-                        site_info.text,
-                    )
-                    continue
-                site_json = site_info.json()
-                site_id = site_json.get("id")
-                self._log("INFO", "OK site id =", site_id)
-                if not site_id:
-                    die("site ID missing in response", site_json)
-                    continue
-            except Exception as e:
-                die("site lookup failed", e)
-                continue
-
-            def _norm(name: str) -> str:
-                return (name or "").lower().replace(" ", "").replace("_", "")
-
-            try:
-                if sharepoint_drive_id:
-                    drive_id = sharepoint_drive_id.strip()
-                    self._log("INFO", "OK: Using drive by ID:", drive_id)
-                else:
-                    drives_resp = requests.get(
-                        f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives",
-                        headers=headers,
-                    )
-                    self._log("DBG", "GET drives status:", drives_resp.status_code)
-                    if drives_resp.status_code != 200:
-                        die(
-                            "cannot list drives. Permissions missing!", drives_resp.text
+                        hi_url = (
+                            re.sub(r"-\d{3,4}-", "-2000-", img_url, count=1)
+                            if "/public/gimg/" in img_url
+                            else img_url
                         )
-                        continue
-                    drives = drives_resp.json().get("value", [])
-                    self._log(
-                        "DBG",
-                        "Available drives:",
-                        [(d.get("name"), d.get("id")) for d in drives],
-                    )
-                    if not drives:
-                        die("No drives found on the site.")
-                        continue
+                        self._log("DBG", "Chosen (possibly hi-res) image:", hi_url)
 
-                    library_name = sharepoint_folder.split("/")[0].strip()
-                    drive = (
-                        next((d for d in drives if d.get("name") == library_name), None)
-                        or next(
-                            (
-                                d
-                                for d in drives
-                                if (d.get("name") or "").lower() == library_name.lower()
-                            ),
-                            None,
-                        )
-                        or next(
-                            (
-                                d
-                                for d in drives
-                                if _norm(d.get("name")) == _norm(library_name)
-                            ),
-                            None,
-                        )
-                    )
-                    if not drive:
-                        print(
-                            f"WARN: Library '{library_name}' not found. Using first drive as fallback."
-                        )
-                        drive = drives[0]
-
-                    drive_id = drive["id"]
-                    self._log("INFO", "OK: Using drive:", drive.get("name"), drive_id)
-            except Exception as e:
-                die("Drive lookup failed", e)
-                continue
-
-            def ensure_folder_path(drive_id: str, folder_path: str):
-                parts = [p for p in folder_path.split("/") if p.strip()]
-                parent_path = ""
-                for part in parts:
-                    parent_path = f"{parent_path}/{part}" if parent_path else part
-                    r = requests.get(
-                        f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{parent_path}",
-                        headers=headers,
-                    )
-                    self._log("DBG", "Check folder", parent_path, "->", r.status_code)
-                    if r.status_code == 404:
-                        parent_parent = (
-                            f"/{parent_path.rsplit('/',1)[0]}"
-                            if "/" in parent_path
-                            else ""
-                        )
-                        create_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:{parent_parent}:/children"
-                        cr = requests.post(
-                            create_url,
-                            headers={**headers, "Content-Type": "application/json"},
-                            json={
-                                "name": part,
-                                "folder": {},
-                                "@microsoft.graph.conflictBehavior": "rename",
-                            },
-                        )
-                        if cr.status_code not in (200, 201):
-                            raise RuntimeError(
-                                f"Failed to create '{part}': {cr.status_code} {cr.text}"
+                        try:
+                            r = requests.get(hi_url, timeout=20)
+                            self._log(
+                                "DBG",
+                                "GET",
+                                hi_url,
+                                "->",
+                                r.status_code,
+                                "lenHdr=",
+                                len(r.content) if r.ok else 0,
                             )
-                    elif r.status_code != 200:
-                        raise RuntimeError(
-                            f"Folder check failed for '{parent_path}': {r.status_code} {r.text}"
+                            if r.status_code == 200 and r.content:
+                                images.append(
+                                    Image.open(BytesIO(r.content)).convert("RGB")
+                                )
+                                md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
+                                self._log(
+                                    "DBG",
+                                    "Downloaded bytes:",
+                                    len(r.content),
+                                    "md5=",
+                                    md5,
+                                )
+                                self._log(
+                                    "INFO",
+                                    f"Page {i}: added image. Total now {len(images)}",
+                                )
+                                continue
+                        except Exception as e:
+                            self._log("DBG", "Direct GET failed:", e)
+
+                        self._log(
+                            "INFO", "Direct download failed; trying visual fallback…"
                         )
-
-            subpath = "/".join(
-                sharepoint_folder.split("/")[1:]
-            )  # strip the library ("Documents")
-            year_folder = f"{today.year}"
-            brand_folder = self.brand_folder_name(market)
-            nested_subpath = f"{subpath}/{brand_folder}/{year_folder}"
-
-            self._log(
-                "INFO", "Ensuring nested path (drive root-relative):", nested_subpath
-            )
-
-            try:
-                if nested_subpath:
-                    ensure_folder_path(drive_id, nested_subpath)
-                    self._log("INFO", "OK: Folder path ensured:", nested_subpath)
-            except Exception as e:
-                die("Creating/checking folder path failed", e)
-                continue
-
-            try:
-                upload_path = "/".join([nested_subpath, filename])
-
-                self._log("INFO", "Uploading to path:", upload_path)
-                upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
-                with open(handzettel.datei.path, "rb") as f:
-                    resp = requests.put(upload_url, headers=headers, data=f)
-                self._log("INFO", "PUT upload status:", resp.status_code)
-
-                data = None
+                        png_bytes = self._capture_best_visual(driver)
+                        if png_bytes:
+                            try:
+                                images.append(
+                                    Image.open(BytesIO(png_bytes)).convert("RGB")
+                                )
+                                self._log(
+                                    "INFO",
+                                    f"Page {i}: added fallback screenshot. Total now {len(images)}",
+                                )
+                            except Exception:
+                                self._log("INFO", "Could not decode fallback visual.")
+                        else:
+                            self._log(
+                                "INFO", "No visual content captured on this page."
+                            )
+            finally:
                 try:
-                    data = resp.json()
+                    driver.quit()
+                    self._log("DBG", "Chrome closed.")
                 except Exception:
                     pass
 
-                if resp.status_code in (200, 201):
-                    weburl = (data or {}).get("webUrl")
-                    if not weburl:
-                        meta = requests.get(
-                            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}",
-                            headers=headers,
-                        )
-                        if meta.status_code == 200:
-                            weburl = meta.json().get("webUrl")
-                    self._log("INFO", "SharePoint webUrl:", weburl or "(not returned)")
-                    self._log("INFO", "PDF successfully uploaded to SharePoint!")
-                else:
-                    print("Response body (truncated):", (resp.text or "")[:500])
-                    die("Error uploading to SharePoint:", resp.status_code)
-                    continue
-            except Exception as e:
-                die("Upload exception", e)
+            if not images:
+                self._log("INFO", "No page images found!")
                 continue
 
-            def search_in_drive(name: str):
+            # Build PDF
+            pdf = BytesIO()
+            images[0].save(pdf, format="PDF", save_all=True, append_images=images[1:])
+            pdf.seek(0)
+            self._log("INFO", f"PDF built with {len(images)} pages.")
+
+            # Save into model Handzettel
+            u = original_input.lower() if original_input else baseurl.lower()
+            market = (
+                "lidl"
+                if "lidl" in u
+                else (
+                    "aldi_nord"
+                    if ("aldi-nord" in u or "aldi_nord" in u)
+                    else (
+                        "aldi_sued"
+                        if ("aldi-sued" in u or "aldi_sued" in u)
+                        else (
+                            "edeka"
+                            if "edeka" in u
+                            else ("kaufland" if "kaufland" in u else "unknown")
+                        )
+                    )
+                )
+            )
+            today = datetime.date.today()
+            iso_week = today.isocalendar()[1]
+            slug = slug_for_filename or self.url_slug(baseurl)
+            brand_folder = self.brand_folder_name(market)
+            filename_prefix = {
+                "lidl": "LidlProspekt",
+                "aldi_nord": "AldiNordProspekt",
+                "aldi_sued": "AldiSuedProspekt",
+                "kaufland": "KauflandProspekt",
+                "edeka": "EdekaProspekt",
+            }.get(market, "Prospekt")
+
+            viewer_id = (
+                (self.viewer_slug(baseurl) or self.url_slug(baseurl))
+                .replace("prospekt-", "")
+                .replace("-0", "")
+            )
+            filename = f"{filename_prefix}_KW{iso_week:02d}.pdf"
+            if multiple:
+                filename = f"{filename_prefix}_KW{iso_week:02d}_{viewer_id}.pdf"
+                title = f"{market.replace('_',' ').upper()} – {slug} – {today:%Y-%m-%d}"
+                self._log(
+                    "DBG",
+                    f"Model filename: {filename} | title: {title} | market: {market}",
+                )
+                handzettel = Handzettel(supermarkt=market, titel=title)
+                handzettel.datei.save(filename, ContentFile(pdf.read()))
+                handzettel.save()
+                self._log("INFO", f"PDF saved to model as '{filename}'.")
+
+                # Azure SharePoint upload
+                self._log("INFO", "Uploading PDF to SharePoint…")
+
+                client_id = os.getenv("AZURE_CLIENT_ID")
+                client_secret = os.getenv("AZURE_CLIENT_SECRET")
+                tenant_id = os.getenv("AZURE_TENANT_ID")
+                sharepoint_site = os.getenv("SHAREPOINT_SITE")
+                sharepoint_folder = os.getenv("SHAREPOINT_FOLDER")
+                sharepoint_drive_id = os.getenv("SHAREPOINT_DRIVE_ID")
+
+                self._log(
+                    "DBG",
+                    "SITE=",
+                    sharepoint_site,
+                    " | FOLDER=",
+                    sharepoint_folder,
+                    " | DRIVE_ID=",
+                    sharepoint_drive_id or "(auto)",
+                )
+
+                def die(msg, *extra):
+                    print("ERROR", msg, *extra)
+                    return
+
+                if not all(
+                    [
+                        client_id,
+                        client_secret,
+                        tenant_id,
+                        sharepoint_site,
+                        sharepoint_folder,
+                    ]
+                ):
+                    die("ERROR: SharePoint/Azure configuration missing!")
+                    continue
+
                 try:
-                    q = urllib.parse.quote(name)
-                    r = requests.get(
-                        f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{q}')",
+                    app = msal.ConfidentialClientApplication(
+                        client_id,
+                        authority=f"https://login.microsoftonline.com/{tenant_id}",
+                        client_credential=client_secret,
+                    )
+                    token_result = app.acquire_token_for_client(
+                        scopes=["https://graph.microsoft.com/.default"]
+                    )
+                    if "access_token" not in token_result:
+                        die(
+                            "ERROR: Could not get access token:",
+                            token_result.get("error_description"),
+                            token_result,
+                        )
+                        continue
+                    token = token_result["access_token"]
+                    headers = {"Authorization": f"Bearer {token}"}
+                    self._log("INFO", "OK: Got access token")
+                except Exception as e:
+                    die("MSAL token error", e)
+                    continue
+
+                try:
+                    site_info = requests.get(
+                        f"https://graph.microsoft.com/v1.0/sites/{sharepoint_site}",
                         headers=headers,
                     )
-                    if r.status_code == 200:
-                        hits = r.json().get("value", [])
-                        self._log("INFO", f"Search hits for '{name}':", len(hits))
-                        for it in hits[:5]:
-                            print("-", it.get("name"), "| webUrl:", it.get("webUrl"))
-                    else:
-                        print("Search failed:", r.status_code, r.text[:400])
+                    self._log("DBG", "GET site status:", site_info.status_code)
+                    if site_info.status_code != 200:
+                        print("GET site body:", site_info.text[:800])
+                        die(
+                            "cannot read site.Check sharepoint site and permissions",
+                            site_info.text,
+                        )
+                        continue
+                    site_json = site_info.json()
+                    site_id = site_json.get("id")
+                    self._log("INFO", "OK site id =", site_id)
+                    if not site_id:
+                        die("site ID missing in response", site_json)
+                        continue
                 except Exception as e:
-                    print("Search exception:", e)
+                    die("site lookup failed", e)
+                    continue
 
-            search_in_drive(filename)
+                def _norm(name: str) -> str:
+                    return (name or "").lower().replace(" ", "").replace("_", "")
 
-        self._log("INFO", "DONE.")
+                try:
+                    if sharepoint_drive_id:
+                        drive_id = sharepoint_drive_id.strip()
+                        self._log("INFO", "OK: Using drive by ID:", drive_id)
+                    else:
+                        drives_resp = requests.get(
+                            f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives",
+                            headers=headers,
+                        )
+                        self._log("DBG", "GET drives status:", drives_resp.status_code)
+                        if drives_resp.status_code != 200:
+                            die(
+                                "cannot list drives. Permissions missing!",
+                                drives_resp.text,
+                            )
+                            continue
+                        drives = drives_resp.json().get("value", [])
+                        self._log(
+                            "DBG",
+                            "Available drives:",
+                            [(d.get("name"), d.get("id")) for d in drives],
+                        )
+                        if not drives:
+                            die("No drives found on the site.")
+                            continue
+
+                        library_name = sharepoint_folder.split("/")[0].strip()
+                        drive = (
+                            next(
+                                (d for d in drives if d.get("name") == library_name),
+                                None,
+                            )
+                            or next(
+                                (
+                                    d
+                                    for d in drives
+                                    if (d.get("name") or "").lower()
+                                    == library_name.lower()
+                                ),
+                                None,
+                            )
+                            or next(
+                                (
+                                    d
+                                    for d in drives
+                                    if _norm(d.get("name")) == _norm(library_name)
+                                ),
+                                None,
+                            )
+                        )
+                        if not drive:
+                            print(
+                                f"WARN: Library '{library_name}' not found. Using first drive as fallback."
+                            )
+                            drive = drives[0]
+
+                        drive_id = drive["id"]
+                        self._log(
+                            "INFO", "OK: Using drive:", drive.get("name"), drive_id
+                        )
+                except Exception as e:
+                    die("Drive lookup failed", e)
+                    continue
+
+                def ensure_folder_path(drive_id: str, folder_path: str):
+                    parts = [p for p in folder_path.split("/") if p.strip()]
+                    parent_path = ""
+                    for part in parts:
+                        parent_path = f"{parent_path}/{part}" if parent_path else part
+                        r = requests.get(
+                            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{parent_path}",
+                            headers=headers,
+                        )
+                        self._log(
+                            "DBG", "Check folder", parent_path, "->", r.status_code
+                        )
+                        if r.status_code == 404:
+                            parent_parent = (
+                                f"/{parent_path.rsplit('/',1)[0]}"
+                                if "/" in parent_path
+                                else ""
+                            )
+                            create_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:{parent_parent}:/children"
+                            cr = requests.post(
+                                create_url,
+                                headers={**headers, "Content-Type": "application/json"},
+                                json={
+                                    "name": part,
+                                    "folder": {},
+                                    "@microsoft.graph.conflictBehavior": "rename",
+                                },
+                            )
+                            if cr.status_code not in (200, 201):
+                                raise RuntimeError(
+                                    f"Failed to create '{part}': {cr.status_code} {cr.text}"
+                                )
+                        elif r.status_code != 200:
+                            raise RuntimeError(
+                                f"Folder check failed for '{parent_path}': {r.status_code} {r.text}"
+                            )
+
+                subpath = "/".join(
+                    sharepoint_folder.split("/")[1:]
+                )  # strip the library ("Documents")
+                year_folder = f"{today.year}"
+                brand_folder = self.brand_folder_name(market)
+                nested_subpath = f"{subpath}/{brand_folder}/{year_folder}"
+
+                self._log(
+                    "INFO",
+                    "Ensuring nested path (drive root-relative):",
+                    nested_subpath,
+                )
+
+                try:
+                    if nested_subpath:
+                        ensure_folder_path(drive_id, nested_subpath)
+                        self._log("INFO", "OK: Folder path ensured:", nested_subpath)
+                except Exception as e:
+                    die("Creating/checking folder path failed", e)
+                    continue
+
+                try:
+                    upload_path = "/".join([nested_subpath, filename])
+
+                    self._log("INFO", "Uploading to path:", upload_path)
+                    upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
+                    with open(handzettel.datei.path, "rb") as f:
+                        resp = requests.put(upload_url, headers=headers, data=f)
+                    self._log("INFO", "PUT upload status:", resp.status_code)
+
+                    data = None
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        pass
+
+                    if resp.status_code in (200, 201):
+                        weburl = (data or {}).get("webUrl")
+                        if not weburl:
+                            meta = requests.get(
+                                f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}",
+                                headers=headers,
+                            )
+                            if meta.status_code == 200:
+                                weburl = meta.json().get("webUrl")
+                        self._log(
+                            "INFO", "SharePoint webUrl:", weburl or "(not returned)"
+                        )
+                        self._log("INFO", "PDF successfully uploaded to SharePoint!")
+                    else:
+                        print("Response body (truncated):", (resp.text or "")[:500])
+                        die("Error uploading to SharePoint:", resp.status_code)
+                        continue
+                except Exception as e:
+                    die("Upload exception", e)
+                    continue
+
+                def search_in_drive(name: str):
+                    try:
+                        q = urllib.parse.quote(name)
+                        r = requests.get(
+                            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root/search(q='{q}')",
+                            headers=headers,
+                        )
+                        if r.status_code == 200:
+                            hits = r.json().get("value", [])
+                            self._log("INFO", f"Search hits for '{name}':", len(hits))
+                            for it in hits[:5]:
+                                print(
+                                    "-", it.get("name"), "| webUrl:", it.get("webUrl")
+                                )
+                        else:
+                            print("Search failed:", r.status_code, r.text[:400])
+                    except Exception as e:
+                        print("Search exception:", e)
+
+                search_in_drive(filename)
+
+            self._log("INFO", "DONE.")
