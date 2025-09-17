@@ -264,10 +264,12 @@ class Command(BaseCommand):
 
     # Inspect viewer page for real dates / status
     def _inspect_viewer_details(self, driver, href: str):
-        status, bonus, reason = "unknown", 0, []
+
         try:
+            # --- 1) Open the viewer page (force #page_1 so images/text are loaded) ---
             driver.get(href if "#page_1" in href else href + "#page_1")
             self._wait_cloudflare(driver)
+            # Small wait until a flyer image element appears
             try:
                 WebDriverWait(driver, 6).until(
                     EC.presence_of_element_located(
@@ -275,65 +277,51 @@ class Command(BaseCommand):
                     )
                 )
             except Exception:
-                pass
+                pass  # don't fail just because the image didn't show fast enough
+            # --- 2) Read page text (headline + full DOM HTML) ---
             html = (driver.page_source or "").lower()
             try:
+                # Many pages include useful dates in <h1> or <h2>
                 head = driver.find_element(By.CSS_SELECTOR, "h1, h2").text.lower()
                 html = head + "\n" + html
             except Exception:
                 pass
-
+            # --- 3) Extract dates from the text (your existing helper parses DE formats) ---
             start, end = self._extract_date_range(html)
             today = datetime.date.today()
+            """
             is_vorschau = any(
-                w in html for w in ("vorschau", "nächste woche", "kommende woche")
+               w in html for w in ("vorschau", "nächste woche", "kommende woche")
             )
-
+            """
+            #  --- 4) Decide the flyer status with simple, explicit rules ---
             if start and end:
                 if start <= today <= end:
-                    status = "current"
-                    b = 2000
-                    bonus += b
-                    reason.append(f"viewer:current+{b}")
+                    status = "current"  # valid now
                 elif today < start:
-                    status = "upcoming"
-                    days = (start - today).days
-                    b = max(600, 1400 - 20 * days)
-                    bonus += b
-                    reason.append(f"viewer:upcoming+{b}")
+                    status = "upcoming"  # starts in the future
                 else:
-                    status = "past"
-                    b = -700
-                    bonus += b
-                    reason.append("viewer:past-700")
+                    status = "past"  # already ended
             elif start and not end:
-                if today >= start:
-                    status = "current"
-                    b = 1600
-                    bonus += b
-                    reason.append("viewer:ab_current+1600")
-                else:
-                    status = "upcoming"
-                    days = (start - today).days
-                    b = max(500, 1200 - 18 * days)
-                    bonus += b
-                    reason.append(f"viewer:ab_upcoming+{b}")
+                # If only a start date is known, treat as current once we reach that date
+                status = "current" if today >= start else "upcoming"
             else:
-                if is_vorschau:
-                    status = "upcoming"
-                    bonus += 900
-                    reason.append("viewer:phrase_vorschau+900")
+                # No dates found: if the page looks like a preview, mark as  unknown
 
+                status = "unknown"
+            # --- 5) Return the standardized structure used by the caller ---
             return {
                 "href": href,
                 "start": start,
                 "end": end,
-                "is_vorschau": is_vorschau,
+                # "is_vorschau": is_vorschau,
                 "status": status,
-                "bonus": int(bonus),
-                "reason": ", ".join(reason),
+                "bonus": 0,  # always zero
+                # "reason": f"status={status}; start={start}; end={end}; vorschau={is_vorschau}",
+                "reason": f"status={status}; start={start}; end={end}",
             }
         except Exception as e:
+            # On any unexpected error, return a safe, neutral structure
             return {
                 "href": href,
                 "start": None,
@@ -742,7 +730,7 @@ class Command(BaseCommand):
                         verified = []
                         for sc, href, why in top:
                             detail = self._inspect_viewer_details(tmp_driver, href)
-                            total = sc + detail["bonus"]
+                            total = sc
                             verified.append(
                                 {
                                     "href": href,
