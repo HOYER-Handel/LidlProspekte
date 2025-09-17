@@ -233,9 +233,7 @@ class Command(BaseCommand):
         return None, None
 
     #  Score a viewer link found on an overview page.Returns score
-    def _score_rk_viewer_link(
-        self, a, retailer_hint: str, mode: str
-    ) -> tuple[int, str, str]:
+    def _score_rk_viewer_link(self, a) -> tuple[int, str, str]:
         # a.Reads text around the link (title + nearby card text).
         href = a.get_attribute("href") or ""
         title = (a.get_attribute("title") or "").strip()
@@ -245,32 +243,24 @@ class Command(BaseCommand):
         # b.Extracts dates → gives positive score if 'current', future score if 'upcoming',negative score if 'past'.
         start, end = self._extract_date_range(blob)
         today = datetime.date.today()
-        score, reasons = 0, []
 
         if start and end:
             if start <= today <= end:
-                score += 1000
-                reasons.append("current")
+                status = "current"
+                score = 3
             elif today < start:
-                days = (start - today).days
-                score += max(1, 500 - 5 * days)  # closer future → higher
-                reasons.append(f"upcoming_in_{days}d")
+                status = "upcoming"
+                score = 2
             else:
-                score -= 150
-                reasons.append("past")
+                status = "past"
+                score = 0
         elif start and not end:
-            if today >= start:
-                score += 800
-                reasons.append("current_Ab")
-            else:
-                days = (start - today).days
-                score += max(1, 400 - 5 * days)
-                reasons.append(f"upcoming_ab_in_{days}d")
-
+            status = "current" if today >= start else "upcoming"
+            score = 3 if status == "current" else 2
         else:
-            reasons.append("no_dates_in_link")
-
-        return int(score), href, ", ".join(reasons)
+            status = "unknown"
+            score = 1
+        return score, href, status
 
     # Inspect viewer page for real dates / status
     def _inspect_viewer_details(self, driver, href: str):
@@ -646,9 +636,7 @@ class Command(BaseCommand):
 
                     overview_scored = []
                     for a in href_elems:
-                        sc, href, why = self._score_rk_viewer_link(
-                            a, retailer_hint, rk_pick_mode
-                        )
+                        sc, href, why = self._score_rk_viewer_link(a)
                         overview_scored.append((sc, href, why))
                     overview_scored.sort(key=lambda t: t[0], reverse=True)
 
