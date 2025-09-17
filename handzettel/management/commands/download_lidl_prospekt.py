@@ -289,11 +289,7 @@ class Command(BaseCommand):
             # --- 3) Extract dates from the text (your existing helper parses DE formats) ---
             start, end = self._extract_date_range(html)
             today = datetime.date.today()
-            """
-            is_vorschau = any(
-               w in html for w in ("vorschau", "nächste woche", "kommende woche")
-            )
-            """
+
             #  --- 4) Decide the flyer status with simple, explicit rules ---
             if start and end:
                 if start <= today <= end:
@@ -317,7 +313,6 @@ class Command(BaseCommand):
                 # "is_vorschau": is_vorschau,
                 "status": status,
                 "bonus": 0,  # always zero
-                # "reason": f"status={status}; start={start}; end={end}; vorschau={is_vorschau}",
                 "reason": f"status={status}; start={start}; end={end}",
             }
         except Exception as e:
