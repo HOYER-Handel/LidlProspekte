@@ -815,6 +815,13 @@ class Command(BaseCommand):
             target_viewers = [baseurl]
         multiple = len(target_viewers) > 1
 
+        selected_details = {}
+        try:
+            for v in verified:
+                selected_details[v["href"]] = v
+        except NameError:
+            pass
+
         # === Process each selected viewer (download → PDF → upload) ===
         for baseurl in target_viewers:
             self._log("INFO", "Processing viewer:", baseurl)
@@ -1106,22 +1113,65 @@ class Command(BaseCommand):
                 "edeka": "EdekaProspekt",
             }.get(market, "Prospekt")
 
-            viewer_id = (
-                (self.viewer_slug(baseurl) or self.url_slug(baseurl))
-                .replace("prospekt-", "")
-                .replace("-0", "")
+            view_info = (
+                selected_details.get(baseurl, {})
+                if "selected_details" in locals()
+                else {}
             )
-            filename = f"{filename_prefix}_KW{iso_week:02d}.pdf"
-            if multiple:
-                filename = f"{filename_prefix}_KW{iso_week:02d}_{viewer_id}.pdf"
+            start_date = view_info.get("start")
+            if isinstance(start_date, datetime.date):
+                iso_week = start_date.isocalendar()[1]
+
+            base_name = f"{filename_prefix}_KW{iso_week:02d}"
+
+            same_date_peers = [
+                v
+                for v in (
+                    selected_details.values() if "selected_details" in locals() else []
+                )
+                if v.get("start") == start_date and v.get("start") is not None
+            ]
+
+            def _looks_like_onlineshop(v: dict) -> bool:
+                tokens = " ".join(
+                    str(v.get(k, "")).lower()
+                    for k in ("why", "href", "title", "reason", "slug")
+                )
+                return any(
+                    t in tokens
+                    for t in ("onlineshop", "online-shop", "online_shop", "online shop")
+                )
+
+            has_onlineshop_twin = any(
+                _looks_like_onlineshop(v) for v in same_date_peers
+            )
+
+            # Decide which filenames to produce/upload
+            if has_onlineshop_twin:
+                filenames_to_upload = [
+                    f"{base_name}_OnlineShop.pdf",
+                    f"{base_name}.pdf",
+                ]
+            else:
+                filenames_to_upload = [f"{base_name}.pdf"]
+
             title = f"{market.replace('_',' ').upper()} – {slug} – {today:%Y-%m-%d}"
+
             self._log(
-                "DBG", f"Model filename: {filename} | title: {title} | market: {market}"
+                "DBG",
+                f"Model basenames: {filenames_to_upload} | title: {title} | market: {market}",
             )
-            handzettel = Handzettel(supermarkt=market, titel=title)
-            handzettel.datei.save(filename, ContentFile(pdf.read()))
-            handzettel.save()
-            self._log("INFO", f"PDF saved to model as '{filename}'.")
+
+            # Save the same PDF bytes for each decided filename
+            pdf_bytes = pdf.getvalue()
+            saved_filenames = []
+            for fname in filenames_to_upload:
+
+                handzettel = Handzettel(supermarkt=market, titel=title)
+                handzettel.datei.save(fname, ContentFile(pdf_bytes))
+                handzettel.save()
+                saved_filenames.append((fname, handzettel))
+                self._log("INFO", f"PDF saved to model as '{fname}'.")
 
             # Azure SharePoint upload
             self._log("INFO", "Uploading PDF to SharePoint…")
@@ -1320,35 +1370,37 @@ class Command(BaseCommand):
                 continue
 
             try:
-                upload_path = "/".join([nested_subpath, filename])
+                for fname, hz in saved_filenames:
+                    upload_path = "/".join([nested_subpath, fname])
+                    self._log("INFO", "Uploading to path:", upload_path)
+                    upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
+                    with open(hz.datei.path, "rb") as f:
+                        resp = requests.put(upload_url, headers=headers, data=f)
+                    self._log("INFO", "PUT upload status:", resp.status_code)
 
-                self._log("INFO", "Uploading to path:", upload_path)
-                upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}:/content"
-                with open(handzettel.datei.path, "rb") as f:
-                    resp = requests.put(upload_url, headers=headers, data=f)
-                self._log("INFO", "PUT upload status:", resp.status_code)
-
-                data = None
-                try:
-                    data = resp.json()
-                except Exception:
-                    pass
-
-                if resp.status_code in (200, 201):
-                    weburl = (data or {}).get("webUrl")
-                    if not weburl:
-                        meta = requests.get(
-                            f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}",
-                            headers=headers,
+                    data = None
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        pass
+                    if resp.status_code in (200, 201):
+                        weburl = (data or {}).get("webUrl")
+                        if not weburl:
+                            meta = requests.get(
+                                f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{upload_path}",
+                                headers=headers,
+                            )
+                            if meta.status_code == 200:
+                                weburl = meta.json().get("webUrl")
+                        self._log(
+                            "INFO", "SharePoint webUrl:", weburl or "(not returned)"
                         )
-                        if meta.status_code == 200:
-                            weburl = meta.json().get("webUrl")
-                    self._log("INFO", "SharePoint webUrl:", weburl or "(not returned)")
-                    self._log("INFO", "PDF successfully uploaded to SharePoint!")
-                else:
-                    print("Response body (truncated):", (resp.text or "")[:500])
-                    die("Error uploading to SharePoint:", resp.status_code)
-                    continue
+                        self._log("INFO", f"Uploaded '{fname}' successfully!")
+                    else:
+                        print("Response body (truncated):", (resp.text or "")[:500])
+                        die("Error uploading to SharePoint:", resp.status_code)
+                        continue
+
             except Exception as e:
                 die("Upload exception", e)
                 continue
@@ -1370,6 +1422,7 @@ class Command(BaseCommand):
                 except Exception as e:
                     print("Search exception:", e)
 
-            search_in_drive(filename)
+            for fname, _ in saved_filenames:
+                search_in_drive(fname)
 
         self._log("INFO", "DONE.")
