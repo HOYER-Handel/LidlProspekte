@@ -262,7 +262,6 @@ class Command(BaseCommand):
             score = 1
         return score, href, status
 
-    # Inspect viewer page for real dates / status
     def _inspect_viewer_details(self, driver, href: str):
 
         try:
@@ -310,7 +309,6 @@ class Command(BaseCommand):
                 "href": href,
                 "start": start,
                 "end": end,
-                # "is_vorschau": is_vorschau,
                 "status": status,
                 "bonus": 0,  # always zero
                 "reason": f"status={status}; start={start}; end={end}",
@@ -725,7 +723,7 @@ class Command(BaseCommand):
                         verified = []
                         for sc, href, why in top:
                             detail = self._inspect_viewer_details(tmp_driver, href)
-                            total = sc
+                            total = sc + detail["bonus"]
                             verified.append(
                                 {
                                     "href": href,
