@@ -547,6 +547,91 @@ class Command(BaseCommand):
             (market or "").lower(), "MISC"
         )  # Returns 'MISC' if the retailer is unknown.
 
+    # ---------- KIMBINO HELPERS ----------
+    def resolve_kimbino_lidl_current(self) -> str | None:
+        try:
+            html = requests.get("https://kimbino.fr/lidl/", timeout=20).text
+            m = re.search(r'href="(/lidl/[^"]*catalogue[^"]*)"', html, flags=re.I)
+            if m:
+                return "https://kimbino.fr" + m.group(1)
+        except Exception:
+            pass
+        return None
+
+    def _collect_kimbino_page_images(self, driver) -> list[str]:
+        imgs = (
+            driver.execute_script(
+                """
+            const out = [];
+            for (const img of Array.from(document.images)) {
+              const src = img.currentSrc || img.src || img.getAttribute('data-src') || '';
+              const w = img.naturalWidth || img.width || 0;
+              const h = img.naturalHeight || img.height || 0;
+              out.push({src, w, h});
+              const ss = img.getAttribute('srcset') || img.getAttribute('data-srcset');
+              if (ss) {
+                for (const part of ss.split(',')) {
+                  const u = part.trim().split(' ')[0];
+                  if (u) out.push({src: u, w, h});
+                }
+              }
+            }
+            return out;
+            """
+            )
+            or []
+        )
+        EXCLUDE = ("analytics", "doubleclick", "googletagmanager", "bat.bing.com")
+        pages = []
+        seen = set()
+        for it in imgs:
+            u = (it.get("src") or "").strip()
+            if not u or not u.startswith("http"):
+                continue
+            if any(x in u for x in EXCLUDE):
+                continue
+            wl = u.lower()
+
+            looks_page = (
+                ("marktjagd" in wl)
+                or ("/images/" in wl)
+                or ("page-" in wl)
+                or ("page_" in wl)
+                or re.search(r"/page[s]?/|/p(?:age)?[-_]?\\d+", wl)
+            )
+            w = int(it.get("w") or 0)
+            h = int(it.get("h") or 0)
+            big_portrait = (w >= 600 and h >= 800) or (h >= w * 1.1)
+            if looks_page or big_portrait:
+                if u not in seen:
+                    seen.add(u)
+                    pages.append(u)
+
+        def _k(u):
+            m = re.search(r"(?:page[-_]?|p)(\d{1,3})", u)
+            return int(m.group(1)) if m else 10_000
+
+        pages.sort(key=_k)
+        return pages
+
+    def _locale_folder_for_sharepoint(self, baseurl: str, market: str) -> str:
+        """
+        Decice the local subfolder to append under the year
+        - Kimbino FR -> "fr"
+        - RK (rabatt-kompass.de) -> "de"
+        - otherwise no loacle folder
+        """
+        try:
+            host = (urlparse(baseurl).netloc or "").lower()
+        except Exception:
+            host = (baseurl or "").lower()
+
+        if "kimbino.fr" in host or "lidl.fr" in host:
+            return "fr"
+        if "rabatt-kompass.de" in host:
+            return "de"
+        return ""
+
     # main flow
     def handle(self, *args, **opts):
         baseurl = opts["baseurl"]
@@ -583,6 +668,21 @@ class Command(BaseCommand):
 
         # --- rabatt-kompass OVERVIEW → resolve to specific viewer(s) ---
         resolved_slug = None
+
+        # --- Kimbino brand page → resolve to current catalogue ---
+        if (
+            "kimbino.fr" in u_low_in
+            and "/lidl/" in u_low_in
+            and "catalogue" not in u_low_in
+        ):
+            try:
+                kimb = self.resolve_kimbino_lidl_current()
+                if kimb:
+                    self._log("INFO", "Kimbino → catalogue actuel:", kimb)
+                    baseurl = kimb
+            except Exception as e:
+                self._log("DBG", "Kimbino resolver error:", e)
+
         if "rabatt-kompass.de" in baseurl and "/prospekt-" not in baseurl:
             target_viewers: list[str] = []
             try:
@@ -822,7 +922,7 @@ class Command(BaseCommand):
         except NameError:
             pass
 
-        # === Process each selected viewer (download → PDF → upload) ===
+        # Process each selected viewer (download → PDF → upload)
         for baseurl in target_viewers:
             self._log("INFO", "Processing viewer:", baseurl)
 
@@ -848,7 +948,7 @@ class Command(BaseCommand):
             prev_img_url = None
             last_fp = None
 
-            # loop through pages (site-aware)
+            # loop through pages
             try:
                 if "rabatt-kompass.de" in baseurl:
                     driver.get(
@@ -952,6 +1052,58 @@ class Command(BaseCommand):
 
                         images.append(img)
                         self._log("INFO", f"Page {i}: added. Total now {len(images)}")
+
+                # ----------- KIMBINO BRANCHE  -----------
+                elif "kimbino.fr" in (urlparse(baseurl).netloc or baseurl).lower():
+
+                    self._log("INFO", "Kimbino mode: single-page catalogue parsing")
+                    driver.get(baseurl)
+                    self._wait_cloudflare(driver)
+                    self.accept_cookies_if_present(driver)
+                    self._wait_first_page_ready(driver)
+
+                    current = driver.current_url or baseurl
+                    overview_slug = self.url_slug(current)
+                    slug_for_filename = overview_slug
+                    self._log(
+                        "INFO",
+                        "Using slug for filename (Kimbino):",
+                        slug_for_filename,
+                    )
+
+                    urls = self._collect_kimbino_page_images(driver)
+                    self._log("INFO", f"Kimbino pages found: {len(urls)}")
+                    if not urls:
+                        self._log("INFO", "No Kimbino page images found!")
+
+                    urls = urls[:pages]
+
+                    last_fp = None
+                    for idx, u in enumerate(urls, 1):
+                        try:
+                            r = requests.get(u, timeout=25)
+                            if r.status_code != 200 or not r.content:
+                                self._log("DBG", "GET failed:", u, "->", r.status_code)
+                                continue
+                            img = Image.open(BytesIO(r.content)).convert("RGB")
+                            try:
+                                fp = self._img_dhash(img)
+                                if last_fp is not None and self._ham(fp, last_fp) <= 2:
+                                    self._log(
+                                        "INFO", f"Kimbino page {idx}: duplicate; skip"
+                                    )
+                                    continue
+                                last_fp = fp
+                            except Exception:
+                                pass
+                            images.append(img)
+                            md5 = hashlib.md5(r.content[:20000]).hexdigest()[:12]
+                            self._log(
+                                "INFO",
+                                f"Kimbino page {idx}: added ({len(r.content)} bytes, md5={md5}). Total {len(images)}",
+                            )
+                        except Exception as e:
+                            self._log("DBG", "Kimbino GET exception:", e)
 
                 else:
                     for i in range(1, pages + 1):
@@ -1355,7 +1507,14 @@ class Command(BaseCommand):
             )  # strip the library ("Documents")
             year_folder = f"{today.year}"
             brand_folder = self.brand_folder_name(market)
+            # locale folder based on source (Kimbino FR = fr, RK = de)
+            locale_folder = self._locale_folder_for_sharepoint(
+                original_input or baseurl, market
+            )
+
             nested_subpath = f"{subpath}/{brand_folder}/{year_folder}"
+            if locale_folder:
+                nested_subpath = f"{nested_subpath}/{locale_folder}"
 
             self._log(
                 "INFO", "Ensuring nested path (drive root-relative):", nested_subpath
