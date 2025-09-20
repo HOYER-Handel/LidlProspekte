@@ -617,19 +617,32 @@ class Command(BaseCommand):
     def _locale_folder_for_sharepoint(self, baseurl: str, market: str) -> str:
         """
         Decice the local subfolder to append under the year
+        a. for lidl only:
         - Kimbino FR -> "fr"
         - RK (rabatt-kompass.de) -> "de"
-        - otherwise no loacle folder
+        b.for others (AldiNord/AldiSüd): no local subfolder
         """
         try:
             host = (urlparse(baseurl).netloc or "").lower()
         except Exception:
             host = (baseurl or "").lower()
+        mkt = (market or "").lower()
 
-        if "kimbino.fr" in host or "lidl.fr" in host:
+        if mkt != "lidl":
+            return ""
+        # Kimbino (FR) → fr
+        if (
+            "kimbino" in host
+            or host.endswith(".fr")
+            or "/fr/" in (baseurl or "").lower()
+        ):
             return "fr"
-        if "rabatt-kompass.de" in host:
+
+        # rabatt-kompass (DE) → de
+        if "rabatt-kompass.de" in host or host.endswith(".de"):
             return "de"
+
+        # Unknown/other → kein Locale
         return ""
 
     # main flow
@@ -1513,12 +1526,10 @@ class Command(BaseCommand):
             )
 
             nested_subpath = f"{subpath}/{brand_folder}/{year_folder}"
-            if locale_folder:
+            if (market or "").lower() == "lidl" and locale_folder:
                 nested_subpath = f"{nested_subpath}/{locale_folder}"
 
-            self._log(
-                "INFO", "Ensuring nested path (drive root-relative):", nested_subpath
-            )
+            self._log("INFO", "Ensuring nested path :", nested_subpath)
 
             try:
                 if nested_subpath:
