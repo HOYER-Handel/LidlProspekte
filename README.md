@@ -41,8 +41,6 @@
     python manage.py makemigrations
     python manage.py migrate
     python manage.py createsuperuser
-   
-
 
 4. **Download and save a brochure as PDF**
    ```bash
