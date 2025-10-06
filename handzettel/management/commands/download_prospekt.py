@@ -38,8 +38,8 @@ class Command(BaseCommand):
             "baseurl",  # direct viewr URL --> the page to start from
             type=str,
             help=(
-                "rabatt-kompass overview OR Lidl URL. "
-                "For Lidl include /page/1 or the base; for rabatt-kompass an overview like "
+                "rabatt-kompass overview "
+                "For rabatt-kompass an overview like "
                 ".../aldi-sued-prospekt is fine."
             ),
         )
@@ -665,18 +665,9 @@ class Command(BaseCommand):
         u_low_in = original_input.lower()
 
         retailer_hint = (
-            "lidl"
-            if "lidl" in u_low_in
-            else (
-                "aldi"
-                if "aldi" in u_low_in
-                else (
-                    "kaufland"
-                    if "kaufland" in u_low_in
-                    else ("edeka" if "edeka" in u_low_in else "")
-                )
-            )
+            "lidl" if "lidl" in u_low_in else ("aldi" if "aldi" in u_low_in else "")
         )
+
         self._log("DBG", "retailer_hint:", retailer_hint)
 
         # --- rabatt-kompass OVERVIEW → resolve to specific viewer(s) ---
@@ -1258,11 +1249,7 @@ class Command(BaseCommand):
                     else (
                         "aldi_sued"
                         if ("aldi-sued" in u or "aldi_sued" in u)
-                        else (
-                            "edeka"
-                            if "edeka" in u
-                            else ("kaufland" if "kaufland" in u else "unknown")
-                        )
+                        else "unlnown"
                     )
                 )
             )
@@ -1274,8 +1261,6 @@ class Command(BaseCommand):
                 "lidl": "LidlProspekt",
                 "aldi_nord": "AldiNordProspekt",
                 "aldi_sued": "AldiSuedProspekt",
-                "kaufland": "KauflandProspekt",
-                "edeka": "EdekaProspekt",
             }.get(market, "Prospekt")
 
             view_info = (
