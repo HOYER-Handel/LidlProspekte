@@ -30,7 +30,7 @@ load_dotenv()
 
 # standard django container --> it s a Django management command, it downloads a flyer from a website and makes PDF
 class Command(BaseCommand):
-    help = "Download a flyer as a PDF (supports rabatt-kompass.de and lidl.de)."
+    help = "Download a flyer as a PDF (supports rabatt-kompass.de)"
 
     # define command line inputs
     def add_arguments(self, parser):
@@ -133,13 +133,13 @@ class Command(BaseCommand):
         return f"{baseurl}#page_{n}"
 
     # --- Slug helpers:Takes the last part of the path and keeps only letters, numbers, '-' and '_'.
-    # Useful for building filenames
+    # Useful for building filenames: Extracts last URL segment e.g Input:/aldi-sued-prospekt, output: aldi-sued-prospekt
     def url_slug(self, url: str) -> str:
         path = urlparse(url).path.rstrip("/")
         seg = (path.split("/")[-1] or "prospekt").lower()
         return re.sub(r"[^a-z0-9_-]+", "-", seg)
 
-    # If the URL contains '/prospekt-<id>-0', returns that exact piece
+    # If the URL contains '/prospekt-<id>-0', returns that exact piece : Extracting the viewer ID
     def viewer_slug(self, url: str) -> str | None:
         m = re.search(r"/prospekt-(\d+)-0", url)
         return f"prospekt-{m.group(1)}-0" if m else None
@@ -233,7 +233,9 @@ class Command(BaseCommand):
         return None, None
 
     #  Score a viewer link found on an overview page.Returns score
-    def _score_rk_viewer_link(self, a) -> tuple[int, str, str]:
+    def _score_rk_viewer_link(
+        self, a
+    ) -> tuple[int, str, str]:  # it returns tuple(score,href,status)
         # a.Reads text around the link (title + nearby card text).
         href = a.get_attribute("href") or ""
         title = (a.get_attribute("title") or "").strip()
@@ -242,6 +244,7 @@ class Command(BaseCommand):
 
         # b.Extracts dates → gives positive score if 'current', future score if 'upcoming',negative score if 'past'.
         start, end = self._extract_date_range(blob)
+        # It compares with today
         today = datetime.date.today()
 
         if start and end:

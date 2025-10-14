@@ -57,7 +57,7 @@ jobs:
 
       - name: Run Django command(s)
         run: |
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" 80
-          python manage.py download_lidl_prospekt "https://kimbino.fr/lidl/" 80
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt" 80
-          python manage.py download_lidl_prospekt "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt" 80
+          python manage.py download_prospekt "https://rabatt-kompass.de/lidl-prospekte/lidl-prospekt" 80
+          python manage.py download_prospekt "https://kimbino.fr/lidl/" 80
+          python manage.py download_prospekt "https://rabatt-kompass.de/aldi-nord-prospekte/aldi-nord-prospekt" 80
+          python manage.py download_prospekt "https://rabatt-kompass.de/aldi-sued-prospekte/aldi-sued-prospekt" 80
