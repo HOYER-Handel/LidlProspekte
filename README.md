@@ -34,11 +34,7 @@
     python manage.py makemigrations
     python manage.py migrate
     python manage.py createsuperuser
-<<<<<<< HEAD
-   
-=======
 
->>>>>>> 7d3887200ded6923258889b2b484dcfef233d1c9
 4. **Download and save a brochure as PDF**
    ```bash
    python manage.py download_lidl_prospekt "URL" PAGES

@@ -1,9 +1,9 @@
 name: Weekly flyer → SharePoint
 
 on:
-  schedule:
-    # Every Monday at 05:07 UTC
-    - cron: "7 5 * * 1"
+  #schedule:
+  # Every Monday at 05:07 UTC
+  # - cron: "7 5 * * 1"
   workflow_dispatch: {} # allow manual run
 
 jobs:
